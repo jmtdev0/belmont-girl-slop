@@ -1,0 +1,19 @@
+{
+  "name": "belmont-girl-slop",
+  "displayName": "belmont girl slop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "generate:palettes": "node scripts/generate-video-palettes.mjs"
+  },
+  "dependencies": {
+    "three": "^0.176.0"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
+  }
+}

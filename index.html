@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#080b19" />
+    <title>all</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="world" aria-label="belmont girl 3D space"></canvas>
+
+      <section id="welcome" class="welcome" aria-labelledby="welcome-title">
+        <div class="welcome__halo"></div>
+        <p class="eyebrow">belmont girl</p>
+        <h1 id="welcome-title">Liminal rooms</h1>
+        <p class="welcome__copy">Enter a space of light, water and memory.</p>
+        <button id="enter-button" class="button button--primary">Enter the universe</button>
+        <p class="welcome__hint">Desktop · WASD to fly · Space/Alt to move up and down · drag to look · wheel to zoom</p>
+      </section>
+
+      <header class="topbar">
+        <div class="topbar__actions">
+          <button id="fullscreen-button" class="icon-button" type="button" aria-label="Enter fullscreen">Fullscreen</button>
+          <button id="menu-button" class="icon-button" type="button" aria-controls="menu" aria-expanded="false">Menu</button>
+        </div>
+      </header>
+
+      <aside id="menu" class="menu" aria-hidden="true">
+        <div class="menu__head">
+          <div>
+            <p class="eyebrow">Library</p>
+            <h2>Configure your room</h2>
+          </div>
+          <button id="close-menu" class="close-button" type="button" aria-label="Close menu">×</button>
+        </div>
+
+        <section class="menu__section">
+          <div class="section-heading"><span>Scene</span></div>
+          <div id="scene-options" class="choice-grid choice-grid--scenes"></div>
+        </section>
+
+        <section class="menu__section">
+          <div class="section-heading"><span>Butterfly colour</span></div>
+          <div class="butterfly-color-picker">
+            <label for="butterfly-color-picker">Custom colour</label>
+            <input id="butterfly-color-picker" type="color" value="#fffdf8" aria-label="Choose an exact butterfly colour" />
+            <output id="butterfly-color-value" for="butterfly-color-picker">#FFFDF8</output>
+          </div>
+          <div class="section-heading section-heading--sub"><span>Quick colours</span></div>
+          <div id="butterfly-palette" class="palette-grid" aria-label="Choose butterfly colour"></div>
+        </section>
+
+        <section class="menu__section menu__section--videos">
+          <div class="section-heading"><span>Videos</span></div>
+          <input id="video-filter" class="video-filter__input" type="search" placeholder="Search videos…" aria-label="Filter videos by text" autocomplete="off" />
+          <div id="video-options" class="video-grid"></div>
+        </section>
+      </aside>
+
+      <div id="audio-notice" class="toast" role="status"></div>
+      <div id="loading" class="loading" aria-hidden="true"><span></span> loading the space</div>
+
+      <aside id="mini-player" class="mini-player" aria-label="Current video">
+        <button id="mini-player-toggle" class="mini-player__toggle" type="button" aria-label="Hide video preview" aria-expanded="true" title="Hide video preview">×</button>
+        <div class="mini-player__meta">
+          <span class="eyebrow">Now</span>
+          <span id="mini-video-title">Selected video</span>
+        </div>
+      </aside>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
