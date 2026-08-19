@@ -31,13 +31,15 @@ const previewSceneId = previewParameters?.get('scene');
 const previewButterflyColorParameter = previewParameters?.get('butterfly-color');
 const previewButterflyPreset = butterflyPalettes.find((palette) => palette.id === previewButterflyColorParameter);
 const previewButterflyColor = normalizeButterflyColor(previewButterflyPreset?.color ?? previewButterflyColorParameter) ?? '#fffdf8';
+const videoBaseUrl = (import.meta.env.VITE_VIDEO_BASE_URL ?? '').trim().replace(/\/+$/, '');
+const playableVideoCatalog = videoBaseUrl ? videoCatalog.filter((video) => !video.localOnly) : videoCatalog;
 
 const state = {
   sceneId: scenes.some((scene) => scene.id === previewSceneId) ? previewSceneId : scenes[Math.floor(Math.random() * scenes.length)].id,
   avatarId: 'butterfly',
   butterflyColorId: butterflyPalettes.find((palette) => palette.color === previewButterflyColor)?.id ?? 'custom',
   butterflyColor: previewButterflyColor,
-  videoId: videoCatalog[Math.floor(Math.random() * videoCatalog.length)].id,
+  videoId: playableVideoCatalog[Math.floor(Math.random() * playableVideoCatalog.length)].id,
   started: false,
 };
 
@@ -57,6 +59,7 @@ const dom = {
   videoFilter: document.querySelector('#video-filter'),
   audioNotice: document.querySelector('#audio-notice'),
   loading: document.querySelector('#loading'),
+  loadingLabel: document.querySelector('#loading-label'),
   miniPlayer: document.querySelector('#mini-player'),
   miniPlayerToggle: document.querySelector('#mini-player-toggle'),
   miniVideoTitle: document.querySelector('#mini-video-title'),
@@ -104,6 +107,7 @@ let moonLight = null;
 const textureFallback = makeFallbackTexture();
 const luminousGlowTexture = makeLuminousGlowTexture();
 const videoElement = document.createElement('video');
+videoElement.crossOrigin = 'anonymous';
 videoElement.loop = false;
 videoElement.playsInline = true;
 videoElement.preload = 'auto';
@@ -180,6 +184,8 @@ let youtubePlayer = null;
 let youtubePlayerReady = false;
 let youtubeScreenObject = null;
 let youtubeMountToken = 0;
+let sceneTransitionToken = 0;
+let sceneTransitionTimer = 0;
 let luminousBubbleBodies = [];
 let butterflyDustObject = null;
 const playerVelocity = new THREE.Vector3();
@@ -189,6 +195,7 @@ const butterflyDustSpawnPoint = new THREE.Vector3();
 const luminousPhysicsDummy = new THREE.Object3D();
 const keys = new Set();
 const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'e', 'alt', 'shift', 'q']);
+const sceneTransitionMinimumDuration = 560;
 
 world.add(stage, player, butterflyDustWorld);
 player.add(avatarRoot);
@@ -233,7 +240,7 @@ function buildInterface() {
   });
   dom.butterflyColorPicker.addEventListener('input', (event) => setButterflyColor(event.target.value));
 
-  videoCatalog.forEach((item) => {
+  playableVideoCatalog.forEach((item) => {
     const button = document.createElement('button');
     button.className = 'video-card';
     button.dataset.id = item.id;
@@ -333,6 +340,38 @@ function buildLights() {
 }
 
 function setScene(sceneId) {
+  const scene = scenes.find((item) => item.id === sceneId);
+  if (!scene || (state.sceneId === sceneId && sceneObjects.length > 0)) return;
+
+  const transitionToken = ++sceneTransitionToken;
+  window.clearTimeout(sceneTransitionTimer);
+  showSceneLoader(scene.label);
+  requestAnimationFrame(() => {
+    if (transitionToken !== sceneTransitionToken) return;
+    const startedAt = performance.now();
+    applyScene(sceneId);
+    requestAnimationFrame(() => {
+      if (transitionToken !== sceneTransitionToken) return;
+      const remaining = Math.max(0, sceneTransitionMinimumDuration - (performance.now() - startedAt));
+      sceneTransitionTimer = window.setTimeout(() => {
+        if (transitionToken === sceneTransitionToken) hideSceneLoader();
+      }, remaining);
+    });
+  });
+}
+
+function showSceneLoader(sceneLabel) {
+  dom.loadingLabel.textContent = sceneLabel;
+  dom.loading.classList.add('is-visible');
+  dom.loading.setAttribute('aria-hidden', 'false');
+}
+
+function hideSceneLoader() {
+  dom.loading.classList.remove('is-visible');
+  dom.loading.setAttribute('aria-hidden', 'true');
+}
+
+function applyScene(sceneId) {
   const previousSceneId = state.sceneId;
   if (previousSceneId === 'youtube-cinema') destroyYouTubeScreen();
   state.sceneId = sceneId;
@@ -1848,6 +1887,10 @@ function doubleHemisphereVideoMaterial() {
 
 function setVideo(videoId) {
   const video = videoCatalog.find((item) => item.id === videoId) ?? videoCatalog[0];
+  if (video.localOnly && videoBaseUrl) {
+    showNotice('This video is only available from the local video folder.');
+    return;
+  }
   if (state.sceneId === 'youtube-cinema' && !video.youtubeUrl) {
     showNotice('This local-only video is not available on YouTube.');
     return;
@@ -1855,7 +1898,7 @@ function setVideo(videoId) {
   state.videoId = video.id;
   lastPaletteUpdate = 0;
   videoElement.pause();
-  videoElement.src = localVideoUrl(video);
+  videoElement.src = localVideoUrl(video, videoBaseUrl);
   videoElement.load();
   videoTexture = new THREE.VideoTexture(videoElement);
   videoTexture.colorSpace = THREE.SRGBColorSpace;
@@ -1879,8 +1922,8 @@ function setVideo(videoId) {
 }
 
 function playRandomVideo() {
-  if (!state.started || videoCatalog.length < 2) return;
-  const candidates = state.sceneId === 'youtube-cinema' ? getYouTubeVideos() : videoCatalog;
+  if (!state.started || playableVideoCatalog.length < 2) return;
+  const candidates = state.sceneId === 'youtube-cinema' ? getYouTubeVideos() : playableVideoCatalog;
   const alternatives = candidates.filter((item) => item.id !== state.videoId);
   const nextVideo = alternatives[Math.floor(Math.random() * alternatives.length)];
   setVideo(nextVideo.id);

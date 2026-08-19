@@ -17,3 +17,6 @@ npm-debug.log*
 *.m4v
 *.avi
 *.wmv
+
+# Local Netlify folder
+.netlify

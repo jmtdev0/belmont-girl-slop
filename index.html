@@ -63,7 +63,16 @@
       </aside>
 
       <div id="audio-notice" class="toast" role="status"></div>
-      <div id="loading" class="loading" aria-hidden="true"><span></span> loading the space</div>
+      <div id="loading" class="scene-loader" aria-hidden="true">
+        <div class="scene-loader__veil" aria-hidden="true"></div>
+        <div class="scene-loader__content" role="status" aria-live="polite">
+          <span class="scene-loader__orb" aria-hidden="true"><span></span></span>
+          <p class="eyebrow">Opening room</p>
+          <strong id="loading-label">Preparing the space</strong>
+          <div class="scene-loader__progress" aria-hidden="true"><span></span></div>
+          <span class="scene-loader__hint">Gathering light and atmosphere</span>
+        </div>
+      </div>
 
       <aside id="mini-player" class="mini-player" aria-label="Current video">
         <button id="mini-player-toggle" class="mini-player__toggle" type="button" aria-label="Hide video preview" aria-expanded="true" title="Hide video preview">×</button>

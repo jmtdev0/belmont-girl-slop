@@ -146,9 +146,11 @@ export const videoCatalog = [
   { id: "ChPA7AcYIBw", fileName: "140_ChPA7AcYIBw.mp4", title: "after prom", thumbnail: "https://i.ytimg.com/vi/ChPA7AcYIBw/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=ChPA7AcYIBw" },
   { id: "5ppOyNQFXko", fileName: "141_5ppOyNQFXko.mp4", title: "i'll be around", thumbnail: "https://i.ytimg.com/vi/5ppOyNQFXko/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=5ppOyNQFXko" },
   { id: "jx_OsKI03Ao", fileName: "142_jx_OsKI03Ao.mp4", title: "love on a real train", thumbnail: "https://i.ytimg.com/vi/jx_OsKI03Ao/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=jx_OsKI03Ao" },
-  { id: "belmontgirl_completo", fileName: "belmontgirl_completo.mp4", title: "belmontgirl_completo", thumbnail: "", youtubeUrl: "" },
+  { id: "belmontgirl_completo", fileName: "belmontgirl_completo.mp4", title: "belmontgirl_completo", thumbnail: "", youtubeUrl: "", localOnly: true },
 ];
 
-export function localVideoUrl(video) {
-  return '/local-videos/' + encodeURIComponent(video.fileName);
+export function localVideoUrl(video, remoteBaseUrl = '') {
+  const baseUrl = remoteBaseUrl.trim().replace(/\/+$/, '');
+  const encodedFileName = encodeURIComponent(video.fileName);
+  return baseUrl ? `${baseUrl}/${encodedFileName}` : `/local-videos/${encodedFileName}`;
 }

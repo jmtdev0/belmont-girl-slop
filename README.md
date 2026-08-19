@@ -9,7 +9,14 @@ npm install
 npm run dev
 ```
 
-Abre la URL local que indique Vite. Para reproducir los vídeos locales durante el desarrollo, crea un archivo `.env.local` a partir de `.env.example` y configura una carpeta de vídeos en tu equipo. La configuración de desarrollo expone esa carpeta únicamente a través del servidor local.
+Abre la URL local que indique Vite. El ejemplo de configuración usa el bucket público de R2:
+
+```powershell
+Copy-Item .env.example .env.local
+npm run dev
+```
+
+`VITE_VIDEO_BASE_URL` determina el origen de los vídeos. Para volver al modo de archivos locales, deja esa variable vacía y configura `BELMONTGIRL_VIDEO_DIR` con una carpeta de vídeos de tu equipo. Esa carpeta se expone únicamente a través del servidor local y nunca se copia al repositorio.
 
 La carpeta no se incluye en este repositorio.
 
