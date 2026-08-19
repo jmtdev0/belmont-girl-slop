@@ -76,6 +76,17 @@
 
       <aside id="mini-player" class="mini-player" aria-label="Current video">
         <button id="mini-player-toggle" class="mini-player__toggle" type="button" aria-label="Hide video preview" aria-expanded="true" title="Hide video preview">×</button>
+        <div class="mini-player__controls" aria-label="Video controls">
+          <input id="mini-video-seek" class="mini-player__seek" type="range" min="0" max="100" step="0.1" value="0" aria-label="Seek through video" disabled>
+          <div class="mini-player__control-row">
+            <span id="mini-video-time" class="mini-player__time">0:00 / 0:00</span>
+            <button id="mini-video-loop" class="mini-player__loop" type="button" aria-label="Loop video" aria-pressed="false" title="Loop video">↻</button>
+            <label class="mini-player__volume" title="Video volume">
+              <span class="mini-player__volume-label" aria-hidden="true">VOL</span>
+              <input id="mini-video-volume" type="range" min="0" max="1" step="0.01" value="0.85" aria-label="Video volume">
+            </label>
+          </div>
+        </div>
         <div class="mini-player__meta">
           <span class="eyebrow">Now</span>
           <span id="mini-video-title">Selected video</span>
