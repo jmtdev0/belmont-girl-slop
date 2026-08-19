@@ -152,5 +152,6 @@ export const videoCatalog = [
 export function localVideoUrl(video, remoteBaseUrl = '') {
   const baseUrl = remoteBaseUrl.trim().replace(/\/+$/, '');
   const encodedFileName = encodeURIComponent(video.fileName);
-  return baseUrl ? `${baseUrl}/${encodedFileName}` : `/local-videos/${encodedFileName}`;
+  const remoteUrl = `${baseUrl}/${encodedFileName}`;
+  return baseUrl ? `${remoteUrl}?cors=1` : `/local-videos/${encodedFileName}`;
 }
