@@ -3,6 +3,8 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { CSS3DObject, CSS3DRenderer } from 'three/addons/renderers/CSS3DRenderer.js';
+import { Sky } from 'three/addons/objects/Sky.js';
+import { Water } from 'three/addons/objects/Water.js';
 import { videoCatalog, localVideoUrl } from './data/catalog.js';
 import { videoPalettes } from './data/video-palettes.js';
 import './styles.css';
@@ -10,7 +12,7 @@ import './styles.css';
 const scenes = [
   { id: 'sphere', label: 'Enveloping sphere', description: 'Inside a sphere of memory', icon: '◌' },
   { id: 'sky', label: 'Sky', description: 'A suspended projection', icon: '☁' },
-  { id: 'beach', label: 'Beach', description: 'The video above the sea', icon: '∿' },
+  { id: 'realistic-beach', label: 'Open sea', description: 'An endless surface of moving water', icon: '◒' },
   { id: 'luminous', label: 'Luminous space', description: 'Orbs holding the image', icon: '✦' },
   { id: 'cube', label: 'Enveloping cube', description: 'A six-sided room', icon: '□' },
   { id: 'cylinder', label: 'Enveloping cylinder', description: 'A circular chamber of light', icon: '○' },
@@ -30,12 +32,16 @@ const previewParameters = import.meta.env.DEV ? new URLSearchParams(window.locat
 const previewSceneId = previewParameters?.get('scene');
 const previewButterflyColorParameter = previewParameters?.get('butterfly-color');
 const previewButterflyPreset = butterflyPalettes.find((palette) => palette.id === previewButterflyColorParameter);
-const previewButterflyColor = normalizeButterflyColor(previewButterflyPreset?.color ?? previewButterflyColorParameter) ?? '#fffdf8';
+const butterflyColorCookieName = 'belmontgirl-butterfly-color';
+const storedButterflyColor = readCookie(butterflyColorCookieName);
+const previewButterflyColor = normalizeButterflyColor(previewButterflyPreset?.color ?? previewButterflyColorParameter)
+  ?? normalizeButterflyColor(storedButterflyColor)
+  ?? '#fffdf8';
 const videoBaseUrl = (import.meta.env.VITE_VIDEO_BASE_URL ?? '').trim().replace(/\/+$/, '');
 const playableVideoCatalog = videoBaseUrl ? videoCatalog.filter((video) => !video.localOnly) : videoCatalog;
 
 const state = {
-  sceneId: scenes.some((scene) => scene.id === previewSceneId) ? previewSceneId : scenes[Math.floor(Math.random() * scenes.length)].id,
+  sceneId: scenes.some((scene) => scene.id === previewSceneId) ? previewSceneId : 'realistic-beach',
   avatarId: 'butterfly',
   butterflyColorId: butterflyPalettes.find((palette) => palette.color === previewButterflyColor)?.id ?? 'custom',
   butterflyColor: previewButterflyColor,
@@ -62,6 +68,10 @@ const dom = {
   loadingLabel: document.querySelector('#loading-label'),
   miniPlayer: document.querySelector('#mini-player'),
   miniPlayerToggle: document.querySelector('#mini-player-toggle'),
+  miniVideoSeek: document.querySelector('#mini-video-seek'),
+  miniVideoLoop: document.querySelector('#mini-video-loop'),
+  miniVideoVolume: document.querySelector('#mini-video-volume'),
+  miniVideoTime: document.querySelector('#mini-video-time'),
   miniVideoTitle: document.querySelector('#mini-video-title'),
 };
 
@@ -104,6 +114,9 @@ const player = new THREE.Group();
 const avatarRoot = new THREE.Group();
 let ambientLight = null;
 let moonLight = null;
+let flashlight = null;
+let flashlightTarget = null;
+let flashlightEnabled = false;
 const textureFallback = makeFallbackTexture();
 const luminousGlowTexture = makeLuminousGlowTexture();
 const videoElement = document.createElement('video');
@@ -115,6 +128,7 @@ videoElement.setAttribute('aria-hidden', 'true');
 videoElement.className = 'mini-player__video';
 videoElement.controls = false;
 videoElement.tabIndex = -1;
+videoElement.volume = Number(dom.miniVideoVolume?.value ?? 0.85);
 dom.miniPlayer.prepend(videoElement);
 const cinemaLightCanvas = document.createElement('canvas');
 cinemaLightCanvas.width = 48;
@@ -128,9 +142,14 @@ let lastCinemaLightSample = -Infinity;
 videoElement.addEventListener('loadeddata', () => {
   lastPaletteUpdate = 0;
   lastCinemaLightSample = -Infinity;
+  syncMiniVideoControls();
 });
+videoElement.addEventListener('loadedmetadata', syncMiniVideoControls);
+videoElement.addEventListener('durationchange', syncMiniVideoControls);
+videoElement.addEventListener('timeupdate', syncMiniVideoControls);
+videoElement.addEventListener('emptied', resetMiniVideoControls);
 videoElement.addEventListener('ended', () => {
-  if (state.sceneId !== 'youtube-cinema') playRandomVideo();
+  if (state.sceneId !== 'youtube-cinema' && !videoElement.loop) playRandomVideo();
 });
 
 let videoTexture = new THREE.VideoTexture(videoElement);
@@ -140,6 +159,10 @@ videoTexture.magFilter = THREE.LinearFilter;
 videoTexture.generateMipmaps = false;
 let activeTexture = textureFallback;
 let sceneObjects = [];
+let realisticBeachWater = null;
+let realisticBeachEnvironment = null;
+let proceduralSandNoise = null;
+let proceduralSandTextures = null;
 const sphereRadius = 90;
 const sphereAvatarMargin = 2.2;
 const cubeHalfExtent = 42;
@@ -155,15 +178,30 @@ const cinemaScreenWidth = 25;
 const cinemaScreenHeight = cinemaScreenWidth * 9 / 16;
 const cinemaScreenCenterY = 4.25;
 const cinemaRowPositions = [-5, 0.2, 5.4, 10.6, 15.8];
+const cinemaChairXPositions = [-12.2, -9.25, -6.3, -3.35, 3.35, 6.3, 9.25, 12.2];
 const cinemaTierRise = 0.78;
 const cinemaAisleWidth = 3.8;
 const cinemaStepsPerTier = 4;
+// Keep the physical obstacle tighter than the visible armrests so the avatar can
+// pass through the narrow gaps between chairs without needing pixel-perfect aim.
+const cinemaChairCollisionHalfWidth = 0.82;
+const cinemaChairCollisionHalfDepth = 0.64;
+const cinemaChairCollisionTop = 2.5;
+const floatingParticleLightnessFloor = 0.5;
 const youtubeScreenZ = -cinemaHalfDepth + 0.42;
 const beachHalfWidth = 7250;
 const beachLandDepth = 6500;
 const beachOceanWidth = 18000;
 const beachOceanDepth = 19500;
 const beachFloorHeight = -0.58;
+const openSeaInstallationCenterZ = -600;
+const openSeaInstallationCenterX = 328;
+const openSeaInstallationInnerRadius = 272;
+const openSeaInstallationOuterRadius = 336;
+const openSeaInstallationHeight = 300;
+const openSeaInstallationBaseY = beachFloorHeight - 0.16;
+const realisticBeachHalfWidth = 6000;
+const realisticBeachLandDepth = 12000;
 const skyFloorHeight = -1.2;
 const luminousLowerBoundary = -26;
 const avatarFloorClearance = 1.82;
@@ -174,6 +212,7 @@ let pitch = 0.18;
 let cameraDistance = state.sceneId === 'sphere' ? 8.5 : 9;
 let dragging = false;
 let menuPointerNear = false;
+let miniPlayerDismissTimer = 0;
 let lastPointer = { x: 0, y: 0 };
 let lastPaletteUpdate = 0;
 let butterflyFlutterPhase = 0;
@@ -189,13 +228,25 @@ let sceneTransitionTimer = 0;
 let luminousBubbleBodies = [];
 let butterflyDustObject = null;
 const playerVelocity = new THREE.Vector3();
+const flashlightDirection = new THREE.Vector3();
+const cameraLookMatrix = new THREE.Matrix4();
+const cameraDesiredQuaternion = new THREE.Quaternion();
 const butterflyDustWorld = new THREE.Group();
 const butterflyDustWorldPoint = new THREE.Vector3();
 const butterflyDustSpawnPoint = new THREE.Vector3();
 const luminousPhysicsDummy = new THREE.Object3D();
 const keys = new Set();
 const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'e', 'alt', 'shift', 'q']);
+const gamepadInput = { moveX: 0, moveY: 0, lookX: 0, lookY: 0, ascend: 0, descend: 0 };
+let activeGamepadIndex = null;
+let lastWPressTime = -Infinity;
+let forwardBoostActive = false;
+let forwardBoostFlutterRemaining = 0;
+let forwardBoostFlutterBlend = 0;
 const sceneTransitionMinimumDuration = 560;
+const forwardBoostDoubleTapWindow = 280;
+const forwardBoostSpeedMultiplier = 2.15;
+const forwardBoostFlutterDuration = 0.82;
 
 world.add(stage, player, butterflyDustWorld);
 player.add(avatarRoot);
@@ -257,11 +308,39 @@ function buildInterface() {
   });
   dom.videoFilter.addEventListener('focus', () => keys.clear());
   dom.miniPlayerToggle.addEventListener('click', () => {
-    const isCollapsed = dom.miniPlayer.classList.toggle('is-collapsed');
-    dom.miniPlayerToggle.textContent = isCollapsed ? '▣' : '×';
-    dom.miniPlayerToggle.setAttribute('aria-expanded', String(!isCollapsed));
-    dom.miniPlayerToggle.setAttribute('aria-label', isCollapsed ? 'Show video preview' : 'Hide video preview');
-    dom.miniPlayerToggle.title = isCollapsed ? 'Show video preview' : 'Hide video preview';
+    const isCollapsed = dom.miniPlayer.classList.contains('is-collapsed');
+    window.clearTimeout(miniPlayerDismissTimer);
+    dom.miniPlayer.classList.toggle('is-collapsed', !isCollapsed);
+    dom.miniPlayer.classList.remove('is-dismissed');
+    updateMiniPlayerToggle(!isCollapsed);
+    if (!isCollapsed) scheduleMiniPlayerDismissal();
+  });
+  dom.miniVideoSeek.addEventListener('input', (event) => {
+    const duration = getMiniVideoDuration();
+    if (!duration) return;
+    const progress = THREE.MathUtils.clamp(Number(event.target.value) / 100, 0, 1);
+    videoElement.currentTime = progress * duration;
+    syncMiniVideoControls();
+  });
+  dom.miniVideoVolume.addEventListener('input', (event) => {
+    const volume = THREE.MathUtils.clamp(Number(event.target.value), 0, 1);
+    videoElement.muted = false;
+    videoElement.volume = volume;
+  });
+  dom.miniVideoLoop.addEventListener('click', () => {
+    videoElement.loop = !videoElement.loop;
+    dom.miniVideoLoop.classList.toggle('is-active', videoElement.loop);
+    dom.miniVideoLoop.setAttribute('aria-pressed', String(videoElement.loop));
+  });
+  [dom.miniVideoSeek, dom.miniVideoLoop, dom.miniVideoVolume].forEach((control) => {
+    control.addEventListener('focus', clearMovementState);
+    control.addEventListener('pointerdown', (event) => {
+      event.stopPropagation();
+      clearMovementState();
+    });
+    control.addEventListener('pointermove', (event) => event.stopPropagation());
+    control.addEventListener('click', (event) => event.stopPropagation());
+    control.addEventListener('keydown', (event) => event.stopPropagation());
   });
 
   dom.enterButton.addEventListener('click', async () => {
@@ -276,18 +355,52 @@ function buildInterface() {
   window.addEventListener('keydown', (event) => {
     if (isTypingTarget(event.target)) return;
     const key = event.key.toLowerCase();
+    if (key === 'f' && !event.repeat) {
+      toggleFlashlight();
+      event.preventDefault();
+      return;
+    }
+    if (key === 'w' && !event.repeat) {
+      const now = performance.now();
+      if (now - lastWPressTime <= forwardBoostDoubleTapWindow) {
+        forwardBoostActive = true;
+        forwardBoostFlutterRemaining = forwardBoostFlutterDuration;
+        lastWPressTime = -Infinity;
+      } else {
+        lastWPressTime = now;
+      }
+    }
     if (movementKeys.has(key)) event.preventDefault();
     keys.add(key);
     if (event.key === 'Escape') toggleMenu(false);
   });
   window.addEventListener('keyup', (event) => {
-    keys.delete(event.key.toLowerCase());
+    const key = event.key.toLowerCase();
+    keys.delete(key);
+    if (key === 'w') {
+      if (forwardBoostActive) {
+        forwardBoostActive = false;
+        forwardBoostFlutterRemaining = 0;
+        lastWPressTime = -Infinity;
+      }
+    }
+  });
+  window.addEventListener('gamepadconnected', (event) => {
+    if (activeGamepadIndex === null) activeGamepadIndex = event.gamepad.index;
+  });
+  window.addEventListener('gamepaddisconnected', (event) => {
+    if (activeGamepadIndex === event.gamepad.index) activeGamepadIndex = null;
+    resetGamepadInput();
+    clearMovementState();
   });
   window.addEventListener('pointermove', (event) => {
     menuPointerNear = event.clientX > window.innerWidth - 280 && event.clientY < 140;
     revealCornerControls(menuPointerNear || dom.menu.classList.contains('is-open'));
+    if (event.clientX < 280 && event.clientY > window.innerHeight - 230) revealMiniPlayer();
   });
   window.addEventListener('blur', clearMovementState);
+  window.addEventListener('focus', clearMovementState);
+  window.addEventListener('pagehide', clearMovementState);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) clearMovementState();
   });
@@ -321,6 +434,88 @@ function buildInterface() {
 function clearMovementState() {
   keys.clear();
   dragging = false;
+  playerVelocity.set(0, 0, 0);
+  lastWPressTime = -Infinity;
+  forwardBoostActive = false;
+  forwardBoostFlutterRemaining = 0;
+  forwardBoostFlutterBlend = 0;
+}
+
+function resetGamepadInput() {
+  gamepadInput.moveX = 0;
+  gamepadInput.moveY = 0;
+  gamepadInput.lookX = 0;
+  gamepadInput.lookY = 0;
+  gamepadInput.ascend = 0;
+  gamepadInput.descend = 0;
+}
+
+function applyGamepadDeadzone(value, deadzone = 0.14) {
+  const magnitude = Math.abs(value);
+  if (magnitude <= deadzone) return 0;
+  return Math.sign(value) * ((magnitude - deadzone) / (1 - deadzone));
+}
+
+function getGamepadAxis(gamepad, index) {
+  return applyGamepadDeadzone(Number(gamepad.axes?.[index] ?? 0));
+}
+
+function getGamepadButtonValue(gamepad, index) {
+  const button = gamepad.buttons?.[index];
+  if (!button) return 0;
+  return Math.max(Number(button.value ?? 0), button.pressed ? 1 : 0);
+}
+
+function findActiveGamepad() {
+  if (typeof navigator.getGamepads !== 'function') return null;
+  const gamepads = navigator.getGamepads();
+  const preferred = activeGamepadIndex === null ? null : gamepads[activeGamepadIndex];
+  if (preferred?.connected) return preferred;
+  const connected = Array.from(gamepads).find((gamepad) => gamepad?.connected);
+  activeGamepadIndex = connected?.index ?? null;
+  return connected ?? null;
+}
+
+function updateGamepadInput(delta) {
+  resetGamepadInput();
+  if (document.hidden || isTypingTarget(document.activeElement)) return;
+  const gamepad = findActiveGamepad();
+  if (!gamepad) return;
+
+  const dpadX = getGamepadButtonValue(gamepad, 15) - getGamepadButtonValue(gamepad, 14);
+  const dpadY = getGamepadButtonValue(gamepad, 13) - getGamepadButtonValue(gamepad, 12);
+  gamepadInput.moveX = THREE.MathUtils.clamp(getGamepadAxis(gamepad, 0) + dpadX, -1, 1);
+  gamepadInput.moveY = THREE.MathUtils.clamp(getGamepadAxis(gamepad, 1) + dpadY, -1, 1);
+  gamepadInput.lookX = getGamepadAxis(gamepad, 2);
+  gamepadInput.lookY = getGamepadAxis(gamepad, 3);
+  // Standard DualShock 4 mapping: L2 is button 6 and R2 is button 7.
+  gamepadInput.descend = getGamepadButtonValue(gamepad, 6);
+  gamepadInput.ascend = getGamepadButtonValue(gamepad, 7);
+
+  yaw += gamepadInput.lookX * 2.4 * delta;
+  const maximumPitch = avatarHiddenForFirstPerson ? Math.PI / 2 - 0.01 : 1.1;
+  const minimumPitch = avatarHiddenForFirstPerson ? -Math.PI / 2 + 0.01 : -1.1;
+  pitch = THREE.MathUtils.clamp(pitch - gamepadInput.lookY * 1.9 * delta, minimumPitch, maximumPitch);
+}
+
+function updateMiniPlayerToggle(isCollapsed) {
+  dom.miniPlayerToggle.textContent = isCollapsed ? '▣' : '×';
+  dom.miniPlayerToggle.setAttribute('aria-expanded', String(!isCollapsed));
+  dom.miniPlayerToggle.setAttribute('aria-label', isCollapsed ? 'Show video preview' : 'Hide video preview');
+  dom.miniPlayerToggle.title = isCollapsed ? 'Show video preview' : 'Hide video preview';
+}
+
+function scheduleMiniPlayerDismissal() {
+  miniPlayerDismissTimer = window.setTimeout(() => {
+    if (dom.miniPlayer.classList.contains('is-collapsed')) dom.miniPlayer.classList.add('is-dismissed');
+  }, 1000);
+}
+
+function revealMiniPlayer() {
+  if (!dom.miniPlayer.classList.contains('is-dismissed')) return;
+  window.clearTimeout(miniPlayerDismissTimer);
+  dom.miniPlayer.classList.remove('is-dismissed', 'is-collapsed');
+  updateMiniPlayerToggle(false);
 }
 
 function isTypingTarget(target) {
@@ -337,6 +532,29 @@ function buildLights() {
   moonLight.castShadow = true;
   moonLight.shadow.mapSize.set(1024, 1024);
   world.add(moonLight);
+
+  flashlight = new THREE.SpotLight('#fff4d6', 0, 100, Math.PI / 5.5, 0.34, 1.15);
+  flashlightTarget = new THREE.Object3D();
+  flashlight.target = flashlightTarget;
+  flashlight.castShadow = false;
+  world.add(flashlight, flashlightTarget);
+}
+
+function toggleFlashlight() {
+  flashlightEnabled = !flashlightEnabled;
+  if (flashlight) flashlight.intensity = flashlightEnabled ? 180 : 0;
+}
+
+function disableFlashlight() {
+  flashlightEnabled = false;
+  if (flashlight) flashlight.intensity = 0;
+}
+
+function updateFlashlight() {
+  if (!flashlight || !flashlightTarget || !flashlightEnabled) return;
+  camera.getWorldDirection(flashlightDirection);
+  flashlight.position.copy(camera.position);
+  flashlightTarget.position.copy(camera.position).addScaledVector(flashlightDirection, 40);
 }
 
 function setScene(sceneId) {
@@ -374,18 +592,26 @@ function hideSceneLoader() {
 function applyScene(sceneId) {
   const previousSceneId = state.sceneId;
   if (previousSceneId === 'youtube-cinema') destroyYouTubeScreen();
+  realisticBeachWater = null;
+  if (realisticBeachEnvironment) {
+    realisticBeachEnvironment.dispose();
+    realisticBeachEnvironment = null;
+  }
+  world.environment = null;
   state.sceneId = sceneId;
   const isCinema = ['cinema', 'youtube-cinema'].includes(sceneId);
-  ambientLight.intensity = isCinema ? 0 : 1.4;
-  moonLight.intensity = isCinema ? 0 : 2.2;
-  cameraDistance = sceneId === 'sphere' ? 8.5 : sceneId === 'beach' ? 18 : ['cinema', 'youtube-cinema'].includes(sceneId) ? 8.3 : 9;
-  if (sceneId === 'beach') {
+  const isRealisticBeach = sceneId === 'realistic-beach';
+  ambientLight.intensity = isCinema ? 0 : isRealisticBeach ? 0.7 : 1.4;
+  moonLight.intensity = isCinema ? 0 : isRealisticBeach ? 0.35 : 2.2;
+  cameraDistance = sceneId === 'sphere' ? 8.5 : sceneId === 'realistic-beach' ? 18 : ['cinema', 'youtube-cinema'].includes(sceneId) ? 8.3 : 9;
+  if (sceneId === 'realistic-beach') {
     yaw = 0;
-    pitch = 0;
-    renderer.toneMappingExposure = 0.96;
-    bloomPass.strength = 0.28;
-    bloomPass.radius = 0.46;
-    bloomPass.threshold = 0.9;
+    pitch = 0.02;
+    player.position.set(0, beachFloorHeight + avatarFloorClearance, openSeaInstallationCenterZ);
+    renderer.toneMappingExposure = 0.9;
+    bloomPass.strength = 0;
+    bloomPass.radius = 0.18;
+    bloomPass.threshold = 0.96;
   } else if (sceneId === 'luminous') {
     yaw = 0;
     pitch = 0.12;
@@ -414,7 +640,7 @@ function applyScene(sceneId) {
   clearScene();
   if (sceneId === 'sphere') buildSphereScene();
   if (sceneId === 'sky') buildSkyScene();
-  if (sceneId === 'beach') buildBeachScene();
+  if (sceneId === 'realistic-beach') buildRealisticBeachScene();
   if (sceneId === 'luminous') buildLuminousScene();
   if (sceneId === 'cube') buildCubeScene();
   if (sceneId === 'cylinder') buildCylinderScene();
@@ -431,6 +657,7 @@ function applyScene(sceneId) {
     applyButterflySceneStyle();
     resetButterflyDust();
   }
+  updateButterflyWingDepthMode();
   document.querySelectorAll('#scene-options [data-id]').forEach((button) => button.classList.toggle('is-selected', button.dataset.id === sceneId));
 }
 
@@ -485,8 +712,8 @@ function beachShorelineZ(x) {
 }
 
 function buildBeachScene() {
-  world.background.set('#2637a3');
-  world.fog.color.set('#a47fbd');
+  world.background.set('#718b91');
+  world.fog.color.set('#b99a86');
   world.fog.density = 0.0042;
 
   const sky = new THREE.Mesh(
@@ -495,9 +722,9 @@ function buildBeachScene() {
       side: THREE.BackSide,
       depthWrite: false,
       uniforms: {
-        uHorizon: { value: new THREE.Color('#c883b8') },
-        uMiddle: { value: new THREE.Color('#5b54c4') },
-        uZenith: { value: new THREE.Color('#172d88') },
+        uHorizon: { value: new THREE.Color('#e8a060') },
+        uMiddle: { value: new THREE.Color('#a7aaa0') },
+        uZenith: { value: new THREE.Color('#718b91') },
       },
       vertexShader: `
         varying vec3 vPosition;
@@ -527,7 +754,7 @@ function buildBeachScene() {
     new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
-        uHorizonColor: { value: new THREE.Color('#8d75b7') },
+        uHorizonColor: { value: new THREE.Color('#c48a61') },
       },
       side: THREE.DoubleSide,
       vertexShader: `
@@ -556,9 +783,9 @@ function buildBeachScene() {
         varying vec3 vWorldPosition;
         void main() {
           float distanceTone = 1.0 - smoothstep(-235.0, 10.0, vWorldPosition.z);
-          vec3 nearColor = vec3(0.16, 0.67, 0.82);
-          vec3 middleColor = vec3(0.075, 0.38, 0.76);
-          vec3 deepColor = vec3(0.10, 0.18, 0.58);
+          vec3 nearColor = vec3(0.34, 0.31, 0.24);
+          vec3 middleColor = vec3(0.46, 0.27, 0.14);
+          vec3 deepColor = vec3(0.16, 0.11, 0.09);
           vec3 color = mix(nearColor, middleColor, smoothstep(0.0, 0.55, distanceTone));
           color = mix(color, deepColor, smoothstep(0.52, 1.0, distanceTone));
           vec2 facetCell = floor(vSurface * 0.095 + vec2(floor(vSurface.y * 0.05) * 0.5, 0.0));
@@ -566,8 +793,8 @@ function buildBeachScene() {
           color *= mix(0.93, 1.07, facet);
           vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
           float fresnel = pow(1.0 - abs(dot(vec3(0.0, 1.0, 0.0), viewDirection)), 3.0);
-          color += vec3(0.18, 0.2, 0.42) * fresnel * 0.42;
-          color += vWave * vec3(0.08, 0.14, 0.15);
+          color += vec3(0.32, 0.25, 0.16) * fresnel * 0.42;
+          color += vWave * vec3(0.15, 0.11, 0.08);
           float shoreline = -4.0 + 0.36 * vWorldPosition.x;
           shoreline += 0.9 * sin((vWorldPosition.x + 18.0) * 0.055) + 0.35 * sin(vWorldPosition.x * 0.14);
           float waterMask = 1.0 - smoothstep(shoreline - 1.8, shoreline + 0.1, vWorldPosition.z);
@@ -591,8 +818,8 @@ function buildBeachScene() {
     roughness: 0.98,
     metalness: 0,
     flatShading: true,
-    emissive: '#4a213d',
-    emissiveIntensity: 0.2,
+    emissive: '#6b4031',
+    emissiveIntensity: 0.1,
   }));
   sand.receiveShadow = true;
   addToStage(sand);
@@ -603,22 +830,10 @@ function buildBeachScene() {
     addToStage(foam);
   });
 
-  const projectionGeometry = new THREE.PlaneGeometry(68, 14, 56, 16);
-  const projectionPositions = projectionGeometry.attributes.position;
-  for (let index = 0; index < projectionPositions.count; index += 1) {
-    const x = projectionPositions.getX(index) / 34;
-    projectionPositions.setZ(index, -Math.pow(Math.abs(x), 1.8) * 1.25);
-  }
-  projectionGeometry.computeVertexNormals();
-  const projection = new THREE.Mesh(projectionGeometry, beachVideoMaterial());
-  projection.position.set(16, 9.8, -66);
-  projection.renderOrder = 2;
-  addToStage(projection);
-
   const horizonHaze = new THREE.Mesh(
     new THREE.PlaneGeometry(18000, 24),
     new THREE.ShaderMaterial({
-      uniforms: { uColor: { value: new THREE.Color('#b69bc8') } },
+       uniforms: { uColor: { value: new THREE.Color('#e4a372') } },
       transparent: true,
       depthWrite: false,
       vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
@@ -637,20 +852,273 @@ function buildBeachScene() {
   horizonHaze.renderOrder = 3;
   addToStage(horizonHaze);
 
-  const sun = new THREE.Mesh(new THREE.PlaneGeometry(18, 18), beachSunMaterial());
-  sun.position.set(-11, 14, -125);
+  const sun = new THREE.Mesh(new THREE.PlaneGeometry(24, 24), beachSunMaterial());
+  sun.position.set(0, 4.2, -420);
   sun.renderOrder = 1;
   addToStage(sun);
-  addSunReflectionPath(-11);
+
   addBeachStars();
   addBeachClouds();
-  addBeachDetails();
-  addBeachVegetation();
   addButterflyGroundGlow();
 
-  const twilightLight = new THREE.DirectionalLight('#ffd0ca', 1.8);
+  const twilightLight = new THREE.DirectionalLight('#f3b37d', 1.45);
   twilightLight.position.set(-24, 20, -18);
   addToStage(twilightLight);
+}
+
+function buildRealisticBeachScene() {
+  world.background.set('#8f9c99');
+  world.fog.color.set('#b9a38d');
+  world.fog.density = 0.00135;
+
+  const sky = new Sky();
+  sky.scale.setScalar(10000);
+  sky.material.uniforms.turbidity.value = 4.8;
+  sky.material.uniforms.rayleigh.value = 1.05;
+  sky.material.uniforms.mieCoefficient.value = 0.0024;
+  sky.material.uniforms.mieDirectionalG.value = 0.76;
+
+  const sun = new THREE.Vector3();
+  const sunElevation = THREE.MathUtils.degToRad(5.5);
+  const sunAzimuth = THREE.MathUtils.degToRad(180);
+  sun.setFromSphericalCoords(1, Math.PI / 2 - sunElevation, sunAzimuth);
+  sky.material.uniforms.sunPosition.value.copy(sun);
+  addToStage(sky);
+
+  const pmremGenerator = new THREE.PMREMGenerator(renderer);
+  realisticBeachEnvironment = pmremGenerator.fromScene(sky).texture;
+  world.environment = realisticBeachEnvironment;
+  pmremGenerator.dispose();
+
+  // Extend the water beyond the camera far plane so its lateral and distant
+  // edges never become visible during normal exploration.
+  const waterSize = 40000;
+  const waterNormals = new THREE.TextureLoader().load('https://threejs.org/examples/textures/waternormals.jpg', (texture) => {
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+  });
+  realisticBeachWater = new Water(new THREE.PlaneGeometry(waterSize, waterSize, 256, 256), {
+    textureWidth: 512,
+    textureHeight: 512,
+    waterNormals,
+    sunDirection: sun.clone().normalize(),
+    sunColor: 0xffc28b,
+    waterColor: 0x5f7775,
+    distortionScale: 2.6,
+    fog: true,
+    alpha: 1,
+  });
+  realisticBeachWater.rotation.x = -Math.PI / 2;
+  realisticBeachWater.position.set(0, beachFloorHeight - 0.08, -waterSize / 2 + 1.25);
+  realisticBeachWater.renderOrder = 1;
+  addToStage(realisticBeachWater);
+
+  // Replace the single convex screen with two thick, mirrored C-shaped
+  // installations lying in the water. Their curved footprint surrounds the
+  // butterfly from the left and right, while the openings face one another.
+  const installationArc = THREE.MathUtils.degToRad(180);
+  const installationOptions = {
+    centerZ: openSeaInstallationCenterZ,
+    innerRadius: openSeaInstallationInnerRadius,
+    outerRadius: openSeaInstallationOuterRadius,
+    height: openSeaInstallationHeight,
+    baseY: openSeaInstallationBaseY,
+  };
+  [
+    { centerX: -openSeaInstallationCenterX, arcStart: Math.PI - installationArc / 2, arcEnd: Math.PI + installationArc / 2 },
+    { centerX: openSeaInstallationCenterX, arcStart: -installationArc / 2, arcEnd: installationArc / 2 },
+  ].forEach((side) => addToStage(makeOpenSeaVideoInstallation({ ...installationOptions, ...side })));
+
+  // This version is open sea only: the water is the sole physical surface.
+  // Keep the sky and the two horizontal video installations, but do not add
+  // sand, a tide wash, shoreline foam, or a separate horizon plane.
+}
+
+function makeOpenSeaVideoInstallation({ centerX, centerZ, innerRadius, outerRadius, height, baseY, arcStart, arcEnd }) {
+  const segmentCount = 112;
+  const shape = new THREE.Shape();
+  // ShapeGeometry is created in X/Y and rotated below so its local Y becomes
+  // world Z. The sign keeps the footprint and the video edge geometry aligned.
+  const pointOnArc = (radius, angle) => new THREE.Vector2(Math.cos(angle) * radius, -Math.sin(angle) * radius);
+
+  shape.moveTo(...pointOnArc(outerRadius, arcStart).toArray());
+  for (let index = 1; index <= segmentCount; index += 1) {
+    const angle = THREE.MathUtils.lerp(arcStart, arcEnd, index / segmentCount);
+    shape.lineTo(...pointOnArc(outerRadius, angle).toArray());
+  }
+  shape.lineTo(...pointOnArc(innerRadius, arcEnd).toArray());
+  for (let index = segmentCount - 1; index >= 0; index -= 1) {
+    const angle = THREE.MathUtils.lerp(arcStart, arcEnd, index / segmentCount);
+    shape.lineTo(...pointOnArc(innerRadius, angle).toArray());
+  }
+  shape.closePath();
+
+  const blockGeometry = new THREE.ExtrudeGeometry(shape, {
+    depth: height,
+    steps: 1,
+    curveSegments: 8,
+    // The video skins meet these faces directly. Removing the bevel prevents
+    // a second set of near-coplanar slivers at every edge and end cap.
+    bevelEnabled: false,
+  });
+  blockGeometry.rotateX(-Math.PI / 2);
+  blockGeometry.computeVertexNormals();
+
+  const block = new THREE.Mesh(blockGeometry, new THREE.MeshPhysicalMaterial({
+    // Keep the structural block untextured. The video is rendered once on
+    // each face below; mapping it here as well would create depth conflicts.
+    color: '#a7bcba',
+    roughness: 0.42,
+    metalness: 0.16,
+    clearcoat: 0.36,
+    clearcoatRoughness: 0.24,
+    side: THREE.DoubleSide,
+  }));
+  block.castShadow = true;
+  block.receiveShadow = true;
+
+  const installationSurfaceOffset = 1.2;
+  // Run the curved video layers all the way into the end caps so the
+  // structural material cannot show through at the joins.
+  const installationEdgeAngleInset = 0;
+  const topVideo = new THREE.Mesh(new THREE.ShapeGeometry(shape, 12), openSeaInstallationVideoMaterial());
+  topVideo.geometry.rotateX(-Math.PI / 2);
+  topVideo.position.y = height + installationSurfaceOffset;
+  topVideo.renderOrder = 3;
+
+  const bottomVideo = new THREE.Mesh(new THREE.ShapeGeometry(shape, 12), openSeaInstallationVideoMaterial());
+  bottomVideo.geometry.rotateX(-Math.PI / 2);
+  bottomVideo.position.y = -installationSurfaceOffset;
+  bottomVideo.renderOrder = 3;
+
+  const innerEdgeVideo = new THREE.Mesh(
+    makeCurvedInstallationEdgeVideoGeometry(
+      innerRadius - installationSurfaceOffset,
+      height,
+      arcStart + installationEdgeAngleInset,
+      arcEnd - installationEdgeAngleInset,
+      segmentCount,
+    ),
+    openSeaInstallationVideoMaterial(),
+  );
+  innerEdgeVideo.renderOrder = 3;
+
+  const outerEdgeVideo = new THREE.Mesh(
+    makeCurvedInstallationEdgeVideoGeometry(
+      outerRadius + installationSurfaceOffset,
+      height,
+      arcStart + installationEdgeAngleInset,
+      arcEnd - installationEdgeAngleInset,
+      segmentCount,
+    ),
+    openSeaInstallationVideoMaterial(),
+  );
+  outerEdgeVideo.renderOrder = 3;
+
+  const startCapVideo = new THREE.Mesh(
+    makeInstallationEndVideoGeometry(
+      innerRadius - installationSurfaceOffset,
+      outerRadius + installationSurfaceOffset,
+      height + installationSurfaceOffset * 2,
+      arcStart,
+      -1,
+      installationSurfaceOffset,
+    ),
+    openSeaInstallationVideoMaterial(),
+  );
+  startCapVideo.position.y = -installationSurfaceOffset;
+  startCapVideo.renderOrder = 3;
+
+  const endCapVideo = new THREE.Mesh(
+    makeInstallationEndVideoGeometry(
+      innerRadius - installationSurfaceOffset,
+      outerRadius + installationSurfaceOffset,
+      height + installationSurfaceOffset * 2,
+      arcEnd,
+      1,
+      installationSurfaceOffset,
+    ),
+    openSeaInstallationVideoMaterial(),
+  );
+  endCapVideo.position.y = -installationSurfaceOffset;
+  endCapVideo.renderOrder = 3;
+
+  const installation = new THREE.Group();
+  installation.position.set(centerX, baseY, centerZ);
+  installation.add(block, topVideo, bottomVideo, innerEdgeVideo, outerEdgeVideo, startCapVideo, endCapVideo);
+  return installation;
+}
+
+function openSeaInstallationVideoMaterial() {
+  return new THREE.MeshBasicMaterial({
+    map: activeTexture,
+    side: THREE.DoubleSide,
+    // The video is opaque, so keep depth writes enabled and avoid transparent
+    // sorting. This makes each video face a single stable depth layer.
+    transparent: false,
+    depthWrite: true,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -4,
+    toneMapped: false,
+  });
+}
+
+function makeInstallationEndVideoGeometry(innerRadius, outerRadius, height, angle, offsetDirection, offset) {
+  const tangent = new THREE.Vector3(-Math.sin(angle), 0, Math.cos(angle)).multiplyScalar(offsetDirection * offset);
+  const point = (radius, y) => [
+    Math.cos(angle) * radius + tangent.x,
+    y,
+    Math.sin(angle) * radius + tangent.z,
+  ];
+  const positions = [
+    ...point(innerRadius, 0),
+    ...point(outerRadius, 0),
+    ...point(outerRadius, height),
+    ...point(innerRadius, height),
+  ];
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute([
+    0, 0,
+    1, 0,
+    1, 1,
+    0, 1,
+  ], 2));
+  geometry.setIndex([0, 1, 2, 0, 2, 3]);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function makeCurvedInstallationEdgeVideoGeometry(radius, height, arcStart, arcEnd, segmentCount) {
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+
+  for (let row = 0; row <= 1; row += 1) {
+    const y = row * height;
+    for (let index = 0; index <= segmentCount; index += 1) {
+      const progress = index / segmentCount;
+      const angle = THREE.MathUtils.lerp(arcStart, arcEnd, progress);
+      positions.push(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
+      uvs.push(progress, row);
+    }
+  }
+
+  for (let index = 0; index < segmentCount; index += 1) {
+    const bottomLeft = index;
+    const bottomRight = index + 1;
+    const topLeft = segmentCount + 1 + index;
+    const topRight = topLeft + 1;
+    indices.push(bottomLeft, bottomRight, topRight, bottomLeft, topRight, topLeft);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
 }
 
 function beachVideoMaterial() {
@@ -697,6 +1165,51 @@ function beachVideoMaterial() {
   });
 }
 
+function curvedBeachVideoMaterial(surfaceAspect) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uMap: { value: activeTexture },
+      uSurfaceAspect: { value: surfaceAspect },
+      uOpacity: { value: 0.94 },
+    },
+    transparent: true,
+    depthWrite: false,
+    toneMapped: false,
+    side: THREE.FrontSide,
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D uMap;
+      uniform float uSurfaceAspect;
+      uniform float uOpacity;
+      varying vec2 vUv;
+
+      void main() {
+        const float videoAspect = 16.0 / 9.0;
+        vec2 videoUv = vUv;
+        if (uSurfaceAspect > videoAspect) {
+          videoUv.y = 0.5 + (vUv.y - 0.5) * videoAspect / uSurfaceAspect;
+        } else {
+          videoUv.x = 0.5 + (vUv.x - 0.5) * uSurfaceAspect / videoAspect;
+        }
+
+        vec4 video = texture2D(uMap, videoUv);
+        float horizontalFade = smoothstep(0.0, 0.08, vUv.x) * smoothstep(0.0, 0.08, 1.0 - vUv.x);
+        float verticalFade = smoothstep(0.0, 0.1, vUv.y) * smoothstep(0.0, 0.1, 1.0 - vUv.y);
+        float edgeFade = horizontalFade * verticalFade;
+        float luminance = dot(video.rgb, vec3(0.299, 0.587, 0.114));
+        float projectionPresence = mix(0.78, 1.0, smoothstep(0.02, 0.38, luminance));
+        gl_FragColor = vec4(video.rgb, video.a * edgeFade * uOpacity * projectionPresence);
+      }
+    `,
+  });
+}
+
 function beachSunMaterial() {
   return new THREE.ShaderMaterial({
     transparent: true,
@@ -723,9 +1236,9 @@ function makeBeachSandGeometry() {
   const positions = [];
   const colors = [];
   const indices = [];
-  const dryColor = new THREE.Color('#e9b7b1');
-  const lavenderColor = new THREE.Color('#c79ab5');
-  const wetColor = new THREE.Color('#a786ad');
+  const dryColor = new THREE.Color('#d4ae88');
+  const lavenderColor = new THREE.Color('#bd9578');
+  const wetColor = new THREE.Color('#a77d64');
 
   for (let depthIndex = 0; depthIndex <= depthSegments; depthIndex += 1) {
     const depthRatio = depthIndex / depthSegments;
@@ -759,6 +1272,349 @@ function makeBeachSandGeometry() {
   return geometry;
 }
 
+function realisticBeachShorelineZ(x) {
+  return Math.sin(x * 0.011) * 0.42 + Math.sin(x * 0.029 + 1.2) * 0.18;
+}
+
+function getProceduralSandNoise() {
+  if (proceduralSandNoise) return proceduralSandNoise;
+  proceduralSandNoise = {
+    base: createPerlinNoise(0x1451),
+    dunes: createPerlinNoise(0x2a71),
+    secondaryDunes: createPerlinNoise(0x3c91),
+    ridges: createPerlinNoise(0x4eb1),
+    detail: createPerlinNoise(0x5fd1),
+    microRipples: createPerlinNoise(0x71f1),
+    sandGrains: createPerlinNoise(0x8311),
+    color: createPerlinNoise(0x9431),
+  };
+  return proceduralSandNoise;
+}
+
+function createPerlinNoise(seed) {
+  const gradients = [
+    [1, 1, 0], [-1, 1, 0], [1, -1, 0], [-1, -1, 0],
+    [1, 0, 1], [-1, 0, 1], [1, 0, -1], [-1, 0, -1],
+    [0, 1, 1], [0, -1, 1], [0, 1, -1], [0, -1, -1],
+  ];
+  const permutation = new Uint8Array(512);
+  const values = Array.from({ length: 256 }, (_, index) => index);
+  let randomState = seed >>> 0;
+  const random = () => {
+    randomState = (1664525 * randomState + 1013904223) >>> 0;
+    return randomState / 4294967296;
+  };
+
+  for (let index = values.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [values[index], values[swapIndex]] = [values[swapIndex], values[index]];
+  }
+  for (let index = 0; index < permutation.length; index += 1) permutation[index] = values[index & 255];
+
+  const fade = (value) => value * value * value * (value * (value * 6 - 15) + 10);
+  const lerp = (start, end, amount) => start + amount * (end - start);
+  const grad = (hash, x, y, z) => {
+    const gradient = gradients[permutation[hash & 255] % gradients.length];
+    return gradient[0] * x + gradient[1] * y + gradient[2] * z;
+  };
+
+  return {
+    noise(x, y, z = 0) {
+      const xFloor = Math.floor(x);
+      const yFloor = Math.floor(y);
+      const zFloor = Math.floor(z);
+      const localX = x - xFloor;
+      const localY = y - yFloor;
+      const localZ = z - zFloor;
+      const X = xFloor & 255;
+      const Y = yFloor & 255;
+      const Z = zFloor & 255;
+      const u = fade(localX);
+      const v = fade(localY);
+      const w = fade(localZ);
+      const A = permutation[X] + Y;
+      const AA = permutation[A & 255] + Z;
+      const AB = permutation[(A + 1) & 255] + Z;
+      const B = permutation[(X + 1) & 255] + Y;
+      const BA = permutation[B & 255] + Z;
+      const BB = permutation[(B + 1) & 255] + Z;
+
+      return lerp(
+        lerp(
+          lerp(grad(AA, localX, localY, localZ), grad(BA, localX - 1, localY, localZ), u),
+          lerp(grad(AB, localX, localY - 1, localZ), grad(BB, localX - 1, localY - 1, localZ), u),
+          v,
+        ),
+        lerp(
+          lerp(grad(AA + 1, localX, localY, localZ - 1), grad(BA + 1, localX - 1, localY, localZ - 1), u),
+          lerp(grad(AB + 1, localX, localY - 1, localZ - 1), grad(BB + 1, localX - 1, localY - 1, localZ - 1), u),
+          v,
+        ),
+        w,
+      );
+    },
+  };
+}
+
+function getProceduralSandTextures() {
+  if (proceduralSandTextures) return proceduralSandTextures;
+  const noise = getProceduralSandNoise();
+  proceduralSandTextures = {
+    normal: makeProceduralSandNormalMap(noise),
+    roughness: makeProceduralSandRoughnessMap(noise),
+  };
+  return proceduralSandTextures;
+}
+
+function makeProceduralSandNormalMap(noise) {
+  const size = 256;
+  const data = new Uint8Array(size * size * 4);
+  const sampleHeight = (u, v) => {
+    const windAngle = Math.PI * 0.25;
+    const rotatedU = u * Math.cos(windAngle) + v * Math.sin(windAngle);
+    const rotatedV = -u * Math.sin(windAngle) + v * Math.cos(windAngle);
+    return noise.microRipples.noise(rotatedU * 26, rotatedV * 7) * 0.78
+      + noise.detail.noise(rotatedU * 76, rotatedV * 24) * 0.16
+      + noise.sandGrains.noise(u * 150, v * 150) * 0.06;
+  };
+  const step = 1 / size;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const u = x / size;
+      const v = y / size;
+      const dx = (sampleHeight(u + step, v) - sampleHeight(u - step, v)) * 1.7;
+      const dy = (sampleHeight(u, v + step) - sampleHeight(u, v - step)) * 1.7;
+      const normal = new THREE.Vector3(-dx, -dy, 1).normalize();
+      const offset = (y * size + x) * 4;
+      data[offset] = Math.round((normal.x * 0.5 + 0.5) * 255);
+      data[offset + 1] = Math.round((normal.y * 0.5 + 0.5) * 255);
+      data[offset + 2] = Math.round(normal.z * 255);
+      data[offset + 3] = 255;
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(20, 20);
+  texture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function makeProceduralSandRoughnessMap(noise) {
+  const size = 256;
+  const data = new Uint8Array(size * size);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const u = x / size;
+      const v = y / size;
+      const variation = noise.sandGrains.noise(u * 180, v * 180) * 7
+        + noise.microRipples.noise(u * 32, v * 10) * 5;
+      data[y * size + x] = THREE.MathUtils.clamp(Math.round(238 + variation), 224, 255);
+    }
+  }
+  const texture = new THREE.DataTexture(data, size, size, THREE.RedFormat, THREE.UnsignedByteType);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(20, 20);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function makeRealisticBeachSandGeometry() {
+  const xSegments = 260;
+  const depthSegments = 150;
+  const noise = getProceduralSandNoise();
+  const windAngle = Math.PI * 0.25;
+  const positions = [];
+  const colors = [];
+  const uvs = [];
+  const indices = [];
+  const dryColor = new THREE.Color('#e4c79e');
+  const warmColor = new THREE.Color('#d2aa7e');
+  const wetColor = new THREE.Color('#a28d7b');
+  const shadowColor = new THREE.Color('#b27f5d');
+  const highlightColor = new THREE.Color('#f3d7ad');
+
+  for (let depthIndex = 0; depthIndex <= depthSegments; depthIndex += 1) {
+    const depthRatio = depthIndex / depthSegments;
+    for (let xIndex = 0; xIndex <= xSegments; xIndex += 1) {
+      const xRatio = xIndex / xSegments;
+      const x = THREE.MathUtils.lerp(-realisticBeachHalfWidth, realisticBeachHalfWidth, xRatio);
+      const shoreline = realisticBeachShorelineZ(x);
+      const z = shoreline + realisticBeachLandDepth * Math.pow(depthRatio, 1.55);
+      const rotatedX = x * Math.cos(windAngle) + z * Math.sin(windAngle);
+      const rotatedZ = -x * Math.sin(windAngle) + z * Math.cos(windAngle);
+      const inlandBlend = THREE.MathUtils.smoothstep(depthRatio, 0.035, 0.72);
+      const baseDune = noise.base.noise(x * 0.00024, z * 0.00024) * 0.12;
+      const directionalDune = noise.dunes.noise(rotatedX * 0.00042, rotatedZ * 0.00018) * 0.42;
+      const secondaryDune = noise.secondaryDunes.noise(rotatedX * 0.0009, rotatedZ * 0.00046) * 0.18;
+      const softRidge = Math.pow(Math.abs(noise.ridges.noise(rotatedX * 0.0015, rotatedZ * 0.0007)), 1.35) * 0.08;
+      const windRipple = noise.microRipples.noise(rotatedX * 0.008, rotatedZ * 0.032) * 0.05;
+      const duneRelief = (baseDune + directionalDune + secondaryDune + softRidge + windRipple) * inlandBlend;
+      const fineRipple = Math.sin(x * 0.032 + z * 0.021) * 0.035 + Math.sin(x * 0.095 - z * 0.014) * 0.018;
+      const broadRipple = Math.sin(x * 0.006 - z * 0.004) * 0.045;
+      positions.push(x, beachFloorHeight + duneRelief + fineRipple + broadRipple * inlandBlend, z);
+      uvs.push(xRatio, depthRatio);
+
+      const colorVariation = noise.color.noise(x * 0.00072, z * 0.00072);
+      const grain = 0.98 + noise.sandGrains.noise(x * 0.024, z * 0.024) * 0.035;
+      const color = wetColor.clone().lerp(warmColor, THREE.MathUtils.smoothstep(depthRatio, 0.015, 0.11));
+      color.lerp(dryColor, THREE.MathUtils.smoothstep(depthRatio, 0.12, 0.34));
+      if (colorVariation > 0) color.lerp(highlightColor, colorVariation * 0.16);
+      else color.lerp(shadowColor, -colorVariation * 0.12);
+      color.multiplyScalar(grain);
+      colors.push(color.r, color.g, color.b);
+
+      if (xIndex < xSegments && depthIndex < depthSegments) {
+        const cursor = depthIndex * (xSegments + 1) + xIndex;
+        const nextRow = cursor + xSegments + 1;
+        indices.push(cursor, nextRow, cursor + 1, cursor + 1, nextRow, nextRow + 1);
+      }
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function makeRealisticTideWash() {
+  const segments = 520;
+  const depthSegments = 12;
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+  const washDepth = 14;
+
+  for (let depthIndex = 0; depthIndex <= depthSegments; depthIndex += 1) {
+    const depthRatio = depthIndex / depthSegments;
+    for (let xIndex = 0; xIndex <= segments; xIndex += 1) {
+      const x = THREE.MathUtils.lerp(-realisticBeachHalfWidth, realisticBeachHalfWidth, xIndex / segments);
+      const z = realisticBeachShorelineZ(x) - washDepth * 0.42 + depthRatio * washDepth;
+      positions.push(x, beachFloorHeight + 0.026 + Math.sin(x * 0.02) * 0.008, z);
+      uvs.push(xIndex / segments, depthRatio);
+      if (xIndex < segments && depthIndex < depthSegments) {
+        const cursor = depthIndex * (segments + 1) + xIndex;
+        const nextRow = cursor + segments + 1;
+        indices.push(cursor, nextRow, cursor + 1, cursor + 1, nextRow, nextRow + 1);
+      }
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  const wash = new THREE.Mesh(geometry, new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uOpacity: { value: 0.3 },
+    },
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    toneMapped: false,
+    vertexShader: `
+      uniform float uTime;
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec3 transformed = position;
+        transformed.z += sin(position.x * 0.035 + uTime * 0.42) * 0.16 * sin(vUv.y * 3.14159265);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uOpacity;
+      varying vec2 vUv;
+      void main() {
+        float across = sin(vUv.y * 3.14159265);
+        float tideTexture = sin(vUv.x * 82.0 + uTime * 0.34) * 0.5 + 0.5;
+        tideTexture *= sin(vUv.x * 181.0 - uTime * 0.21) * 0.5 + 0.5;
+        vec3 washColor = mix(vec3(0.78, 0.88, 0.86), vec3(0.98, 0.88, 0.76), vUv.y);
+        float alpha = across * mix(0.16, 0.5, tideTexture) * uOpacity;
+        gl_FragColor = vec4(washColor, alpha);
+      }
+    `,
+  }));
+  wash.userData.beachTime = true;
+  wash.userData.realisticTide = { phase: 0.8, amplitude: 0.9, speed: 0.16, baseZ: 0 };
+  wash.renderOrder = 2;
+  return wash;
+}
+
+function makeRealisticShorelineFoam({ offset, width, phase, opacity, amplitude, speed }) {
+  const segments = 520;
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+
+  for (let index = 0; index <= segments; index += 1) {
+    const ratio = index / segments;
+    const x = THREE.MathUtils.lerp(-realisticBeachHalfWidth, realisticBeachHalfWidth, ratio);
+    const center = realisticBeachShorelineZ(x) + offset + Math.sin(x * 0.022 + phase) * 0.12;
+    positions.push(x, beachFloorHeight + 0.062, center - width, x, beachFloorHeight + 0.062, center + width);
+    uvs.push(ratio, 0, ratio, 1);
+    if (index < segments) {
+      const cursor = index * 2;
+      indices.push(cursor, cursor + 1, cursor + 2, cursor + 1, cursor + 3, cursor + 2);
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  const foam = new THREE.Mesh(geometry, new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uPhase: { value: phase },
+      uOpacity: { value: opacity },
+    },
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    toneMapped: false,
+    vertexShader: `
+      uniform float uTime;
+      uniform float uPhase;
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec3 transformed = position;
+        transformed.z += sin(position.x * 0.04 + uTime * 0.5 + uPhase) * 0.1 * sin(vUv.y * 3.14159265);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform float uTime;
+      uniform float uPhase;
+      uniform float uOpacity;
+      varying vec2 vUv;
+      void main() {
+        float across = sin(vUv.y * 3.14159265);
+        float broadBreak = sin(vUv.x * 74.0 + uPhase * 3.0 + uTime * 0.24) * 0.5 + 0.5;
+        float fineBreak = sin(vUv.x * 193.0 - uPhase * 1.7 - uTime * 0.38) * 0.5 + 0.5;
+        float broken = smoothstep(0.2, 0.68, broadBreak * 0.72 + fineBreak * 0.28);
+        float alpha = across * mix(0.22, 1.0, broken) * uOpacity;
+        vec3 foamColor = mix(vec3(0.92, 0.97, 0.96), vec3(1.0, 0.88, 0.76), 0.16);
+        gl_FragColor = vec4(foamColor, alpha);
+      }
+    `,
+  }));
+  foam.userData.beachTime = true;
+  foam.userData.realisticTide = { phase, amplitude, speed, baseZ: 0 };
+  foam.renderOrder = 3;
+  return foam;
+}
+
 function makeWetSandBand() {
   const segments = 1800;
   const positions = [];
@@ -778,7 +1634,7 @@ function makeWetSandBand() {
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setIndex(indices);
   return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-    color: '#a98cae',
+     color: '#9d7660',
     transparent: true,
     opacity: 0.22,
     depthWrite: false,
@@ -940,11 +1796,11 @@ function addBeachClouds() {
   ];
   cloudPositions.forEach(([x, y, z, scale], cloudIndex) => {
     const cloud = new THREE.Group();
-    const lower = new THREE.Mesh(cloudGeometry, new THREE.MeshBasicMaterial({ color: '#8f75bb', transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide }));
+    const lower = new THREE.Mesh(cloudGeometry, new THREE.MeshBasicMaterial({ color: '#a87972', transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide }));
     lower.position.set(0, -0.18, 0.08);
     lower.scale.set(1.04, 0.78, 1);
     cloud.add(lower);
-    const upper = new THREE.Mesh(cloudGeometry, new THREE.MeshBasicMaterial({ color: '#c59dce', transparent: true, opacity: 0.17, depthWrite: false, side: THREE.DoubleSide }));
+    const upper = new THREE.Mesh(cloudGeometry, new THREE.MeshBasicMaterial({ color: '#d9a17e', transparent: true, opacity: 0.17, depthWrite: false, side: THREE.DoubleSide }));
     upper.scale.set(1, 0.72, 1);
     cloud.add(upper);
     cloud.position.set(x, y, z);
@@ -955,24 +1811,6 @@ function addBeachClouds() {
 }
 
 function addBeachDetails() {
-  const rockMaterial = new THREE.MeshStandardMaterial({ color: '#555090', emissive: '#222458', emissiveIntensity: 0.2, roughness: 0.94, metalness: 0.01, flatShading: true });
-  const rockData = [
-    [-9.8, 0.18, 6.5, 2.7], [-7.1, 0.3, 4.0, 2.15], [-12.4, 0.05, 2.8, 1.75],
-    [-4.8, -0.02, 1.8, 0.72], [8.5, -0.05, 7.5, 1.15], [14.5, -0.04, 15.0, 0.7],
-    [5.2, -0.08, 26.0, 0.55], [-14.0, -0.03, 31.0, 0.62],
-  ];
-  rockData.forEach(([x, y, z, scale], index) => {
-    const material = rockMaterial.clone();
-    material.color.offsetHSL(index % 2 ? 0.015 : -0.01, 0, index < 4 ? -0.055 : 0.035);
-    const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(scale, 0), material);
-    rock.position.set(x, y, z);
-    rock.scale.set(1.4, 0.58 + (index % 3) * 0.13, 1.04);
-    rock.rotation.set(index * 0.27, index * 0.8, index * 0.12);
-    rock.castShadow = index < 4;
-    rock.receiveShadow = true;
-    addToStage(rock);
-  });
-
   const shellMaterial = new THREE.MeshStandardMaterial({ color: '#d5a5c1', roughness: 0.78, flatShading: true });
   [[-5, 0.02, 18], [12, -0.03, 34], [-15, 0.01, 39], [4, -0.04, 24]].forEach(([x, y, z], index) => {
     const shell = new THREE.Mesh(new THREE.ConeGeometry(0.28 + index * 0.035, 0.32, 7), shellMaterial.clone());
@@ -1311,7 +2149,7 @@ function buildCubeScene() {
   world.fog.density = 0.008;
 
   const cubeSize = cubeHalfExtent * 2;
-  const cube = new THREE.Mesh(new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize), materialForVideo(THREE.BackSide, 0.94));
+  const cube = new THREE.Mesh(new THREE.BoxGeometry(cubeSize, cubeSize, cubeSize), materialForVideo(THREE.BackSide, 0.94, true));
   addToStage(cube);
 
   const edges = new THREE.LineSegments(
@@ -1331,7 +2169,7 @@ function buildCylinderScene() {
   const cylinderHeight = cylinderHalfHeight * 2;
   const cylinder = new THREE.Mesh(
     new THREE.CylinderGeometry(cylinderRadius, cylinderRadius, cylinderHeight, 128, 1, false),
-    materialForVideo(THREE.BackSide, 0.94),
+    materialForVideo(THREE.BackSide, 0.94, true),
   );
   addToStage(cylinder);
 
@@ -1429,6 +2267,7 @@ function buildCinemaScene(useYouTubeScreen = false) {
   const screen = useYouTubeScreen
     ? new THREE.Mesh(new THREE.PlaneGeometry(cinemaScreenWidth, cinemaScreenHeight), new THREE.MeshBasicMaterial({ color: '#020204', toneMapped: false }))
     : videoPlane(cinemaScreenWidth, cinemaScreenHeight);
+  screen.material.depthWrite = false;
   screen.position.set(0, cinemaScreenCenterY, -cinemaHalfDepth + 0.28);
   screen.renderOrder = 2;
   room.add(screen);
@@ -1456,9 +2295,8 @@ function buildCinemaScene(useYouTubeScreen = false) {
 
   const chairMaterial = new THREE.MeshStandardMaterial({ color: '#210816', roughness: 0.9 });
   const chairTrimMaterial = new THREE.MeshStandardMaterial({ color: '#120a12', roughness: 0.58, metalness: 0.28 });
-  const chairPositions = [-12.2, -9.25, -6.3, -3.35, 3.35, 6.3, 9.25, 12.2];
   cinemaRowPositions.forEach((z, rowIndex) => {
-    chairPositions.forEach((x) => {
+    cinemaChairXPositions.forEach((x) => {
       room.add(createCinemaChair(x, cinemaFloor + rowIndex * cinemaTierRise, z, chairMaterial, chairTrimMaterial));
     });
   });
@@ -1830,8 +2668,18 @@ function videoPlane(width, height) {
   return new THREE.Mesh(new THREE.PlaneGeometry(width, height), materialForVideo(THREE.FrontSide, 0.94));
 }
 
-function materialForVideo(side = THREE.FrontSide, opacity = 1) {
-  return new THREE.MeshBasicMaterial({ map: activeTexture, side, transparent: opacity < 1, opacity, toneMapped: false });
+function materialForVideo(side = THREE.FrontSide, opacity = 1, flipX = false) {
+  const material = new THREE.MeshBasicMaterial({ map: activeTexture, side, transparent: opacity < 1, opacity, toneMapped: false });
+  if (flipX) {
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <uv_vertex>',
+        '#include <uv_vertex>\n\t\tvMapUv.x = 1.0 - vMapUv.x;',
+      );
+    };
+    material.customProgramCacheKey = () => 'video-horizontal-flip';
+  }
+  return material;
 }
 
 function doubleHemisphereVideoMaterial() {
@@ -1897,6 +2745,7 @@ function setVideo(videoId) {
   }
   state.videoId = video.id;
   lastPaletteUpdate = 0;
+  resetMiniVideoControls();
   videoElement.pause();
   videoElement.src = localVideoUrl(video, videoBaseUrl);
   videoElement.load();
@@ -1929,6 +2778,33 @@ function playRandomVideo() {
   setVideo(nextVideo.id);
 }
 
+function getMiniVideoDuration() {
+  return Number.isFinite(videoElement.duration) && videoElement.duration > 0 ? videoElement.duration : 0;
+}
+
+function formatMiniVideoTime(seconds) {
+  const safeSeconds = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = String(safeSeconds % 60).padStart(2, '0');
+  if (minutes < 60) return `${minutes}:${remainingSeconds}`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}:${String(minutes % 60).padStart(2, '0')}:${remainingSeconds}`;
+}
+
+function syncMiniVideoControls() {
+  const duration = getMiniVideoDuration();
+  const currentTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : 0;
+  dom.miniVideoSeek.disabled = !duration;
+  dom.miniVideoSeek.value = duration ? String((currentTime / duration) * 100) : '0';
+  dom.miniVideoTime.textContent = `${formatMiniVideoTime(currentTime)} / ${formatMiniVideoTime(duration)}`;
+}
+
+function resetMiniVideoControls() {
+  dom.miniVideoSeek.disabled = true;
+  dom.miniVideoSeek.value = '0';
+  dom.miniVideoTime.textContent = '0:00 / 0:00';
+}
+
 function refreshVideoMaterials() {
   stage.traverse((object) => {
     if (!object.isMesh || !object.material) return;
@@ -1956,6 +2832,7 @@ function setAvatar() {
   }
   buildButterfly();
   avatarRoot.traverse((object) => object.layers.enable(1));
+  updateButterflyWingDepthMode();
   document.querySelectorAll('#butterfly-palette [data-id]').forEach((button) => button.classList.toggle('is-selected', button.dataset.id === state.butterflyColorId));
   if (dom.butterflyColorPicker) dom.butterflyColorPicker.value = state.butterflyColor;
   if (dom.butterflyColorValue) dom.butterflyColorValue.textContent = state.butterflyColor.toUpperCase();
@@ -1970,6 +2847,7 @@ function setButterflyColor(colorValue) {
   const color = normalizeButterflyColor(colorValue);
   if (!color) return;
   const palette = butterflyPalettes.find((item) => item.color.toLowerCase() === color.toLowerCase());
+  writeCookie(butterflyColorCookieName, color);
   if (state.butterflyColor === color) return;
   state.butterflyColor = color;
   state.butterflyColorId = palette?.id ?? 'custom';
@@ -1979,6 +2857,21 @@ function setButterflyColor(colorValue) {
 function normalizeButterflyColor(colorValue) {
   if (typeof colorValue !== 'string' || !/^#[0-9a-f]{6}$/i.test(colorValue)) return null;
   return `#${colorValue.slice(1).toLowerCase()}`;
+}
+
+function readCookie(name) {
+  const encodedName = `${encodeURIComponent(name)}=`;
+  const entry = document.cookie.split('; ').find((cookie) => cookie.startsWith(encodedName));
+  if (!entry) return null;
+  try {
+    return decodeURIComponent(entry.slice(encodedName.length));
+  } catch {
+    return null;
+  }
+}
+
+function writeCookie(name, value) {
+  document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; Max-Age=${60 * 60 * 24 * 365}; Path=/; SameSite=Lax`;
 }
 
 function getCustomButterflyPalette(colorValue) {
@@ -2006,9 +2899,13 @@ function getActiveButterflyPalette() {
 
 function getButterflyWingStyle() {
   const isCinema = ['cinema', 'youtube-cinema'].includes(state.sceneId);
-  return isCinema
-    ? { opacity: 0.74, transmission: 0.04 }
-    : { opacity: 0.34, transmission: 0.32 };
+  if (isCinema) {
+    return { opacity: 0.92, transmission: 0 };
+  }
+  if (state.sceneId === 'realistic-beach') {
+    return { opacity: 0.88, transmission: 0 };
+  }
+  return { opacity: 0.34, transmission: 0.32 };
 }
 
 function applyButterflySceneStyle() {
@@ -2018,6 +2915,18 @@ function applyButterflySceneStyle() {
     object.material.opacity = style.opacity;
     object.material.transmission = style.transmission;
     object.material.needsUpdate = true;
+  });
+}
+
+function updateButterflyWingDepthMode() {
+  const prioritizeWings = ['realistic-beach', 'cinema', 'youtube-cinema'].includes(state.sceneId);
+  avatarRoot.traverse((object) => {
+    const material = object.material;
+    if (!material?.userData?.butterflyWingPriority) return;
+    material.depthTest = !prioritizeWings;
+    material.depthWrite = false;
+    material.needsUpdate = true;
+    object.renderOrder = prioritizeWings ? 100 : (object.isLine ? 22 : 20);
   });
 }
 
@@ -2141,7 +3050,9 @@ function buildButterfly() {
     lowerShape.bezierCurveTo(0.22, -1.16, 0.04, -0.5, 0.06, 0.02);
 
     [upperShape, lowerShape].forEach((shape, index) => {
-      const wing = new THREE.Mesh(new THREE.ShapeGeometry(shape, 32), wingFill.clone());
+      const wingMaterial = wingFill.clone();
+      wingMaterial.userData.butterflyWingPriority = true;
+      const wing = new THREE.Mesh(new THREE.ShapeGeometry(shape, 32), wingMaterial);
       wing.position.z = index === 0 ? 0 : 0.015;
       wing.renderOrder = 20;
 
@@ -2150,7 +3061,9 @@ function buildButterfly() {
         const x = point.x * side;
         if (Math.abs(x) > 0.45) dustPerimeter.push(new THREE.Vector3(x, point.y, point.z));
       });
-      const outline = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(outlinePoints), wingLine.clone());
+      const outlineMaterial = wingLine.clone();
+      outlineMaterial.userData.butterflyWingPriority = true;
+      const outline = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(outlinePoints), outlineMaterial);
       outline.renderOrder = 22;
       (index === 0 ? upperWing : lowerWing).add(outline);
       (index === 0 ? upperWing : lowerWing).add(wing);
@@ -2165,7 +3078,9 @@ function buildButterfly() {
     ];
     veinPaths.forEach((coordinates, index) => {
       const curve = new THREE.CatmullRomCurve3(coordinates.map(([x, y]) => new THREE.Vector3(x, y, 0.045)));
-      const vein = new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(28)), wingLine.clone());
+      const veinMaterial = wingLine.clone();
+      veinMaterial.userData.butterflyWingPriority = true;
+      const vein = new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(28)), veinMaterial);
       vein.renderOrder = 22;
       (index >= 3 ? lowerWing : upperWing).add(vein);
     });
@@ -2394,7 +3309,7 @@ function addGlowParticles(count, color, spread, reactToVideo = false, distributi
   const amplitudes = new Float32Array(count);
   const colors = new Float32Array(count * 3);
   const initialPalette = reactToVideo ? getStaticVideoPalette(state.videoId, 0) : null;
-  const initialColor = initialPalette?.[0] ?? new THREE.Color(color);
+  const initialColor = makeLuminousPaletteColor(initialPalette?.[0] ?? new THREE.Color(color), floatingParticleLightnessFloor);
   for (let index = 0; index < count; index += 1) {
     if (distribution === 'cylinder') {
       const angle = Math.random() * Math.PI * 2;
@@ -2625,10 +3540,11 @@ function updateParticlePalette(delta) {
     const colors = colorAttribute.array;
     for (let index = 0; index < colors.length / 3; index += 1) {
       const target = targetPalette[index % targetPalette.length];
+      const luminousTarget = makeLuminousPaletteColor(target, floatingParticleLightnessFloor);
       const offset = index * 3;
-      colors[offset] += (target.r - colors[offset]) * blend;
-      colors[offset + 1] += (target.g - colors[offset + 1]) * blend;
-      colors[offset + 2] += (target.b - colors[offset + 2]) * blend;
+      colors[offset] += (luminousTarget.r - colors[offset]) * blend;
+      colors[offset + 1] += (luminousTarget.g - colors[offset + 1]) * blend;
+      colors[offset + 2] += (luminousTarget.b - colors[offset + 2]) * blend;
     }
     colorAttribute.needsUpdate = true;
   });
@@ -2655,7 +3571,8 @@ async function playVideoWithAudio() {
     return;
   }
   videoElement.muted = false;
-  videoElement.volume = 0.85;
+  const selectedVolume = Number(dom.miniVideoVolume?.value);
+  videoElement.volume = Number.isFinite(selectedVolume) ? THREE.MathUtils.clamp(selectedVolume, 0, 1) : 0.85;
   try {
     await videoElement.play();
     dom.audioNotice.classList.remove('is-visible');
@@ -2712,9 +3629,17 @@ function updatePlayer(delta) {
   if (keys.has('d') || keys.has('arrowright')) direction.add(right);
   if (keys.has(' ') || keys.has('e')) direction.y += 1;
   if (keys.has('alt') || keys.has('shift') || keys.has('q')) direction.y -= 1;
+  direction.addScaledVector(forward, -gamepadInput.moveY);
+  direction.addScaledVector(right, gamepadInput.moveX);
+  direction.y += gamepadInput.ascend - gamepadInput.descend;
+  if (forwardBoostActive && keys.has('w') && forwardBoostFlutterRemaining > 0) {
+    forwardBoostFlutterRemaining = Math.max(0, forwardBoostFlutterRemaining - delta);
+  }
   if (direction.lengthSq()) {
     direction.normalize();
-    playerVelocity.copy(direction).multiplyScalar(6.5);
+    const isForwardBoosting = forwardBoostActive && keys.has('w');
+    const movementSpeed = isForwardBoosting ? 6.5 * forwardBoostSpeedMultiplier : 6.5;
+    playerVelocity.copy(direction).multiplyScalar(movementSpeed);
     player.position.addScaledVector(playerVelocity, delta);
     if (state.sceneId === 'sphere') {
       const maximumDistance = sphereRadius - sphereAvatarMargin;
@@ -2733,7 +3658,7 @@ function updatePlayer(delta) {
         player.position.z *= scale;
       }
       player.position.y = THREE.MathUtils.clamp(player.position.y, -cylinderHalfHeight + cylinderAvatarMargin, cylinderHalfHeight - cylinderAvatarMargin);
-    } else if (state.sceneId === 'beach') {
+    } else if (state.sceneId === 'realistic-beach') {
       player.position.x = THREE.MathUtils.clamp(player.position.x, -3000, 3000);
       player.position.z = THREE.MathUtils.clamp(player.position.z, -3000, 3000);
     } else if (state.sceneId === 'sky') {
@@ -2754,6 +3679,8 @@ function updatePlayer(delta) {
     playerVelocity.set(0, 0, 0);
   }
   applyPlayerFloorCollision();
+  resolveOpenSeaInstallationCollisions();
+  resolveCinemaChairCollisions();
   const horizontalForward = new THREE.Vector3(forward.x, 0, forward.z);
   if (horizontalForward.lengthSq() > 0.0001) {
     horizontalForward.normalize();
@@ -2763,7 +3690,7 @@ function updatePlayer(delta) {
 }
 
 function applyPlayerFloorCollision() {
-  if (state.sceneId === 'beach') {
+  if (state.sceneId === 'realistic-beach') {
     player.position.y = THREE.MathUtils.clamp(player.position.y, beachFloorHeight + avatarFloorClearance, 250);
   } else if (state.sceneId === 'sky') {
     player.position.y = THREE.MathUtils.clamp(player.position.y, skyFloorHeight + avatarFloorClearance, 18);
@@ -2775,9 +3702,113 @@ function applyPlayerFloorCollision() {
   }
 }
 
+function resolveCinemaChairCollisions() {
+  if (!['cinema', 'youtube-cinema'].includes(state.sceneId)) return;
+
+  const horizontalRadius = Math.min(getAvatarCollisionRadius(), 0.55);
+  const verticalRadius = avatarFloorClearance * 0.72;
+  const avatarCenterY = player.position.y + avatarRoot.position.y;
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    cinemaRowPositions.forEach((z, rowIndex) => {
+      const chairFloor = cinemaFloor + rowIndex * cinemaTierRise;
+      const chairBottom = chairFloor + 0.04;
+      const chairTop = chairFloor + cinemaChairCollisionTop;
+      if (avatarCenterY - verticalRadius > chairTop || avatarCenterY + verticalRadius < chairBottom) return;
+
+      cinemaChairXPositions.forEach((x) => {
+        const offsetX = player.position.x - x;
+        const offsetZ = player.position.z - (z + 0.04);
+        const overlapX = cinemaChairCollisionHalfWidth + horizontalRadius - Math.abs(offsetX);
+        const overlapZ = cinemaChairCollisionHalfDepth + horizontalRadius - Math.abs(offsetZ);
+        if (overlapX <= 0 || overlapZ <= 0) return;
+
+        let normalX = 0;
+        let normalZ = 0;
+        if (overlapX < overlapZ) {
+          normalX = offsetX < 0 ? -1 : 1;
+          player.position.x += normalX * overlapX;
+        } else {
+          normalZ = offsetZ < 0 ? -1 : 1;
+          player.position.z += normalZ * overlapZ;
+        }
+
+        const normal = new THREE.Vector3(normalX, 0, normalZ);
+        const inwardSpeed = playerVelocity.dot(normal);
+        if (inwardSpeed < 0) playerVelocity.addScaledVector(normal, -inwardSpeed);
+      });
+    });
+  }
+}
+
+function resolveOpenSeaInstallationCollisions() {
+  if (state.sceneId !== 'realistic-beach') return;
+
+  const horizontalRadius = getAvatarCollisionRadius();
+  const verticalRadius = Math.min(avatarFloorClearance * 0.72, 1.35);
+  const avatarCenterY = player.position.y + avatarRoot.position.y;
+  const wallBottom = openSeaInstallationBaseY;
+  const wallTop = openSeaInstallationBaseY + openSeaInstallationHeight;
+  if (avatarCenterY - verticalRadius > wallTop || avatarCenterY + verticalRadius < wallBottom) return;
+
+  // Resolve twice because an avatar can touch an inner/outer curve and an end
+  // cap in the same frame, especially while using the forward boost.
+  for (let pass = 0; pass < 2; pass += 1) {
+    [-1, 1].forEach((sideSign) => {
+      const centerX = sideSign * openSeaInstallationCenterX;
+      const offsetX = player.position.x - centerX;
+      const offsetZ = player.position.z - openSeaInstallationCenterZ;
+      const distanceFromCenter = Math.hypot(offsetX, offsetZ);
+      const nearThisSemicircle = sideSign * offsetX >= -horizontalRadius;
+      const innerLimit = openSeaInstallationInnerRadius - horizontalRadius;
+      const outerLimit = openSeaInstallationOuterRadius + horizontalRadius;
+
+      if (nearThisSemicircle
+        && distanceFromCenter > 0.0001
+        && distanceFromCenter > innerLimit
+        && distanceFromCenter < outerLimit) {
+        const innerPush = distanceFromCenter - innerLimit;
+        const outerPush = outerLimit - distanceFromCenter;
+        const pushToInner = innerPush <= outerPush;
+        const targetRadius = pushToInner ? innerLimit : outerLimit;
+        const normalX = offsetX / distanceFromCenter;
+        const normalZ = offsetZ / distanceFromCenter;
+
+        player.position.x = centerX + normalX * targetRadius;
+        player.position.z = openSeaInstallationCenterZ + normalZ * targetRadius;
+
+        const normalSpeed = playerVelocity.x * normalX + playerVelocity.z * normalZ;
+        const movingIntoWall = pushToInner ? normalSpeed > 0 : normalSpeed < 0;
+        if (movingIntoWall) {
+          playerVelocity.x -= normalX * normalSpeed;
+          playerVelocity.z -= normalZ * normalSpeed;
+        }
+      }
+
+      // Each semicircle has two straight end caps. They face the central
+      // opening, so keep the avatar on that side of the cap plane.
+      [-1, 1].forEach((endpointSign) => {
+        const endpointInnerZ = openSeaInstallationCenterZ + endpointSign * openSeaInstallationInnerRadius;
+        const endpointOuterZ = openSeaInstallationCenterZ + endpointSign * openSeaInstallationOuterRadius;
+        const endpointMinZ = Math.min(endpointInnerZ, endpointOuterZ) - horizontalRadius;
+        const endpointMaxZ = Math.max(endpointInnerZ, endpointOuterZ) + horizontalRadius;
+        if (player.position.z < endpointMinZ || player.position.z > endpointMaxZ) return;
+
+        const distanceFromCap = Math.abs(player.position.x - centerX);
+        if (distanceFromCap >= horizontalRadius) return;
+
+        const openingNormalX = -sideSign;
+        player.position.x = centerX + openingNormalX * horizontalRadius;
+        const velocityIntoCap = playerVelocity.x * sideSign;
+        if (velocityIntoCap > 0) playerVelocity.x -= sideSign * velocityIntoCap;
+      });
+    });
+  }
+}
+
 function getButterflyFloorFold() {
   let floorHeight = null;
-  if (state.sceneId === 'beach') floorHeight = beachFloorHeight;
+  if (state.sceneId === 'realistic-beach') floorHeight = beachFloorHeight;
   if (state.sceneId === 'sky') floorHeight = skyFloorHeight;
   if (['cinema', 'youtube-cinema'].includes(state.sceneId)) floorHeight = getCinemaFloorHeightAt(player.position.x, player.position.z);
   if (floorHeight === null) return 0;
@@ -2920,7 +3951,7 @@ function updateLuminousBubblePhysics(delta) {
 
 function updateCamera(delta) {
   const forward = getViewDirection();
-  const cameraLift = state.sceneId === 'beach' ? 5.5 : 2.2;
+  const cameraLift = state.sceneId === 'realistic-beach' ? 5.5 : 2.2;
   const thirdPersonPosition = player.position.clone().addScaledVector(forward, -cameraDistance).add(new THREE.Vector3(0, cameraLift, 0));
   const firstPersonPosition = player.position.clone().add(new THREE.Vector3(0, 1.1, 0)).addScaledVector(forward, 0.18);
   const firstPersonBlend = 1 - THREE.MathUtils.smoothstep(cameraDistance, firstPersonDistance, firstPersonBlendStart);
@@ -2948,10 +3979,14 @@ function updateCamera(delta) {
     const localFloor = getCinemaFloorHeightAt(desiredPosition.x, desiredPosition.z);
     desiredPosition.y = THREE.MathUtils.clamp(desiredPosition.y, localFloor + 0.55, cinemaCeiling - 0.55);
   }
+  const desiredFloorHeight = getCameraFloorHeight(desiredPosition.x, desiredPosition.z);
+  if (desiredFloorHeight !== null) desiredPosition.y = Math.max(desiredPosition.y, desiredFloorHeight + 0.58);
   const targetHeight = 1;
-  const targetDistance = state.sceneId === 'beach' ? 12 : 5.5;
+  const targetDistance = state.sceneId === 'realistic-beach' ? 12 : 5.5;
   const target = player.position.clone().add(new THREE.Vector3(0, targetHeight, 0)).addScaledVector(forward, targetDistance);
   camera.position.lerp(desiredPosition, 1 - Math.pow(0.0005, delta));
+  const cameraFloorHeight = getCameraFloorHeight(camera.position.x, camera.position.z);
+  if (cameraFloorHeight !== null) camera.position.y = Math.max(camera.position.y, cameraFloorHeight + 0.58);
   if (firstPersonBlend > 0.999) {
     camera.position.copy(desiredPosition);
     avatarHiddenForFirstPerson = true;
@@ -2959,17 +3994,31 @@ function updateCamera(delta) {
     avatarHiddenForFirstPerson = false;
   }
   avatarRoot.visible = !avatarHiddenForFirstPerson;
-  camera.lookAt(target);
+  cameraLookMatrix.lookAt(camera.position, target, camera.up);
+  cameraDesiredQuaternion.setFromRotationMatrix(cameraLookMatrix);
+  camera.quaternion.slerp(cameraDesiredQuaternion, 1 - Math.pow(0.0005, delta));
+}
+
+function getCameraFloorHeight(x, z) {
+  if (state.sceneId === 'realistic-beach') return beachFloorHeight;
+  if (state.sceneId === 'sky') return skyFloorHeight;
+  if (['cinema', 'youtube-cinema'].includes(state.sceneId)) return getCinemaFloorHeightAt(x, z);
+  return null;
 }
 
 function animate() {
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.05);
+  updateGamepadInput(delta);
   updatePlayer(delta);
   updateLuminousBubblePhysics(delta);
   updateCamera(delta);
+  updateFlashlight();
   updateParticlePalette(delta);
   updateCinemaProjectionLight(delta);
+  if (realisticBeachWater?.material?.uniforms?.time) {
+    realisticBeachWater.material.uniforms.time.value = clock.elapsedTime;
+  }
   avatarRoot.position.y = Math.sin(clock.elapsedTime * 1.5) * 0.08;
   const avatarPitchTarget = state.avatarId === 'butterfly' ? pitch : 0;
   avatarRoot.rotation.x = THREE.MathUtils.damp(avatarRoot.rotation.x, avatarPitchTarget, 6.5, delta);
@@ -2981,10 +4030,16 @@ function animate() {
       break;
     }
   }
+  if (Math.abs(gamepadInput.moveX) > 0.08 || Math.abs(gamepadInput.moveY) > 0.08
+    || gamepadInput.ascend > 0.08 || gamepadInput.descend > 0.08) flightMovement = true;
   const flutterTarget = flightMovement && state.avatarId === 'butterfly' ? 1 : 0;
   butterflyFlutterBlend = THREE.MathUtils.damp(butterflyFlutterBlend, flutterTarget, 5, delta);
-  const flutterSpeed = THREE.MathUtils.lerp(3.1, 7.2, butterflyFlutterBlend);
-  const flutterAmount = THREE.MathUtils.lerp(0.11, 0.24, butterflyFlutterBlend);
+  const forwardBoostFlutterTarget = forwardBoostActive
+    && forwardBoostFlutterRemaining > 0
+    && state.avatarId === 'butterfly' ? 1 : 0;
+  forwardBoostFlutterBlend = THREE.MathUtils.damp(forwardBoostFlutterBlend, forwardBoostFlutterTarget, 8, delta);
+  const flutterSpeed = THREE.MathUtils.lerp(3.1, 7.2, butterflyFlutterBlend) + forwardBoostFlutterBlend * 4.6;
+  const flutterAmount = THREE.MathUtils.lerp(0.11, 0.24, butterflyFlutterBlend) + forwardBoostFlutterBlend * 0.16;
   butterflyFlutterPhase += delta * flutterSpeed;
   const flutter = Math.sin(butterflyFlutterPhase) * flutterAmount;
   avatarRoot.children.forEach((part) => {
@@ -3011,6 +4066,10 @@ function animate() {
       const { phase, baseOpacity } = object.userData.beachFoam;
       object.material.uniforms.uOpacity.value = baseOpacity + Math.sin(clock.elapsedTime * 0.8 + phase) * 0.055;
       object.position.z = Math.sin(clock.elapsedTime * 0.34 + phase) * 0.16;
+    }
+    if (object.userData.realisticTide) {
+      const { phase, amplitude, speed, baseZ } = object.userData.realisticTide;
+      object.position.z = baseZ + Math.sin(clock.elapsedTime * speed + phase) * amplitude;
     }
     if (object.userData.beachCloud) {
       const { baseX, phase } = object.userData.beachCloud;
