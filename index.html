@@ -17,8 +17,7 @@
       <section id="welcome" class="welcome" aria-labelledby="welcome-title">
         <div class="welcome__halo"></div>
         <p class="eyebrow">belmont girl</p>
-        <h1 id="welcome-title">Liminal rooms</h1>
-        <p class="welcome__copy">Enter a space of light, water and memory.</p>
+        <h1 id="welcome-title">all</h1>
         <button id="enter-button" class="button button--primary">Enter the universe</button>
         <p class="welcome__hint">Desktop · WASD to fly · Space/Alt to move up and down · drag to look · wheel to zoom</p>
       </section>
@@ -42,6 +41,10 @@
         <section class="menu__section">
           <div class="section-heading"><span>Scene</span></div>
           <div id="scene-options" class="choice-grid choice-grid--scenes"></div>
+          <div id="open-sea-modes" class="scene-suboptions" hidden aria-hidden="true">
+            <div class="section-heading section-heading--sub"><span>Open sea atmosphere</span></div>
+            <div id="open-sea-mode-options" class="choice-grid choice-grid--open-sea-modes" aria-label="Choose open sea atmosphere"></div>
+          </div>
         </section>
 
         <section class="menu__section">
@@ -81,6 +84,7 @@
           <div class="mini-player__control-row">
             <span id="mini-video-time" class="mini-player__time">0:00 / 0:00</span>
             <button id="mini-video-loop" class="mini-player__loop" type="button" aria-label="Loop video" aria-pressed="false" title="Loop video">↻</button>
+            <button id="mini-video-mute" class="mini-player__mute" type="button" aria-label="Mute video" aria-pressed="false" title="Mute video">🔊</button>
             <label class="mini-player__volume" title="Video volume">
               <span class="mini-player__volume-label" aria-hidden="true">VOL</span>
               <input id="mini-video-volume" type="range" min="0" max="1" step="0.01" value="0.85" aria-label="Video volume">

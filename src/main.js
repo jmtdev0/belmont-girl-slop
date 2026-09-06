@@ -1,13 +1,23 @@
 import * as THREE from 'three';
+import { naturalizeWater } from './NaturalWater.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { makeDawnSky } from './DawnSky.js';
+import { createCloudVolume } from './VolumetricClouds.js';
 import { CSS3DObject, CSS3DRenderer } from 'three/addons/renderers/CSS3DRenderer.js';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { Water } from 'three/addons/objects/Water.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { videoCatalog, localVideoUrl } from './data/catalog.js';
 import { videoPalettes } from './data/video-palettes.js';
 import './styles.css';
+
+// Share one clock between the visible dawn sky and the prism reflection sky.
+const openSeaSkyTime = { value: 0 };
+let openSeaCloudVolume = null;
 
 const scenes = [
   { id: 'sphere', label: 'Enveloping sphere', description: 'Inside a sphere of memory', icon: '◌' },
@@ -20,6 +30,87 @@ const scenes = [
   { id: 'youtube-cinema', label: 'YouTube cinema', description: 'A tiered screening with possible ads', icon: '▶' },
 ];
 
+const openSeaModes = [
+  { id: 'daylight', label: 'Daylight', description: 'Clear and bright', icon: '☀' },
+  { id: 'dawn', label: 'Dawn', description: 'Warm horizon light', icon: '◒' },
+  { id: 'night', label: 'Night', description: 'Stars over dark water', icon: '✦' },
+];
+
+const openSeaAtmospheres = {
+  daylight: {
+    background: '#9ebbc8',
+    fogColor: '#afc2c6',
+    fogDensity: 0.00042,
+    sky: { turbidity: 2.6, rayleigh: 1.45, mieCoefficient: 0.0012, mieDirectionalG: 0.68 },
+    sunElevation: 27,
+    sunAzimuth: 180,
+    sunColor: 0xfff1d8,
+    waterColor: 0x477f8d,
+    prismTopColor: '#679aa1',
+    prismSideColor: '#3f7078',
+    prismDeepColor: '#153f4b',
+    prismHighlightColor: '#bde9df',
+    exposure: 1.02,
+    ambientColor: '#d2e7ee',
+    groundColor: '#244d58',
+    ambientIntensity: 0.92,
+    moonColor: '#d5e4ff',
+    moonIntensity: 0.18,
+    bloomStrength: 0.12,
+    bloomRadius: 0.32,
+    bloomThreshold: 1.35,
+    stars: false,
+  },
+  dawn: {
+    background: '#dfa57c',
+    fogColor: '#caa28e',
+    fogDensity: 0.00016,
+    sky: { turbidity: 4.8, rayleigh: 1.05, mieCoefficient: 0.0024, mieDirectionalG: 0.76 },
+    sunElevation: 2.4,
+    sunAzimuth: 180,
+    sunColor: 0xffa348,
+    waterColor: 0x24495e,
+    prismTopColor: '#6f9697',
+    prismSideColor: '#456f73',
+    prismDeepColor: '#173f4c',
+    prismHighlightColor: '#b7e8e2',
+    exposure: 1.05,
+    ambientColor: '#c8d5e2',
+    groundColor: '#655042',
+    ambientIntensity: 0.35,
+    moonColor: '#d5e4ff',
+    moonIntensity: 0,
+    bloomStrength: 0.12,
+    bloomRadius: 0.25,
+    bloomThreshold: 1.3,
+    stars: false,
+  },
+  night: {
+    background: '#071225',
+    fogColor: '#0b1830',
+    fogDensity: 0.00072,
+    sky: { turbidity: 1.55, rayleigh: 0.22, mieCoefficient: 0.00035, mieDirectionalG: 0.92 },
+    sunElevation: -9,
+    sunAzimuth: 180,
+    sunColor: 0x1c3568,
+    waterColor: 0x12384b,
+    prismTopColor: '#285c6b',
+    prismSideColor: '#1b4657',
+    prismDeepColor: '#081f32',
+    prismHighlightColor: '#6ba8b1',
+    exposure: 0.55,
+    ambientColor: '#526f9e',
+    groundColor: '#081d30',
+    ambientIntensity: 0.24,
+    moonColor: '#819bd0',
+    moonIntensity: 0.52,
+    bloomStrength: 0.3,
+    bloomRadius: 0.48,
+    bloomThreshold: 1.3,
+    stars: true,
+  },
+};
+
 const butterflyPalettes = [
   { id: 'pearl', label: 'Pearl', color: '#fffdf8', fill: '#fffdf8', line: '#fffaf0', emissive: '#eee5ff', body: '#fffdf8', bodyEmissive: '#f2ddff', aura: '#ffffff', glow: '#ffffff' },
   { id: 'rose', label: 'Rose', color: '#ffd7eb', fill: '#ffd7eb', line: '#fff1fb', emissive: '#f3a8d2', body: '#ffe3f2', bodyEmissive: '#ec9ac9', aura: '#ffe8f6', glow: '#ffd2eb' },
@@ -30,6 +121,7 @@ const butterflyPalettes = [
 
 const previewParameters = import.meta.env.DEV ? new URLSearchParams(window.location.search) : null;
 const previewSceneId = previewParameters?.get('scene');
+const previewOpenSeaMode = previewParameters?.get('open-sea-mode');
 const previewButterflyColorParameter = previewParameters?.get('butterfly-color');
 const previewButterflyPreset = butterflyPalettes.find((palette) => palette.id === previewButterflyColorParameter);
 const butterflyColorCookieName = 'belmontgirl-butterfly-color';
@@ -42,6 +134,7 @@ const playableVideoCatalog = videoBaseUrl ? videoCatalog.filter((video) => !vide
 
 const state = {
   sceneId: scenes.some((scene) => scene.id === previewSceneId) ? previewSceneId : 'realistic-beach',
+  openSeaMode: openSeaModes.some((mode) => mode.id === previewOpenSeaMode) ? previewOpenSeaMode : 'dawn',
   avatarId: 'butterfly',
   butterflyColorId: butterflyPalettes.find((palette) => palette.color === previewButterflyColor)?.id ?? 'custom',
   butterflyColor: previewButterflyColor,
@@ -58,6 +151,8 @@ const dom = {
   fullscreenButton: document.querySelector('#fullscreen-button'),
   closeMenu: document.querySelector('#close-menu'),
   sceneOptions: document.querySelector('#scene-options'),
+  openSeaModes: document.querySelector('#open-sea-modes'),
+  openSeaModeOptions: document.querySelector('#open-sea-mode-options'),
   butterflyPalette: document.querySelector('#butterfly-palette'),
   butterflyColorPicker: document.querySelector('#butterfly-color-picker'),
   butterflyColorValue: document.querySelector('#butterfly-color-value'),
@@ -70,6 +165,7 @@ const dom = {
   miniPlayerToggle: document.querySelector('#mini-player-toggle'),
   miniVideoSeek: document.querySelector('#mini-video-seek'),
   miniVideoLoop: document.querySelector('#mini-video-loop'),
+  miniVideoMute: document.querySelector('#mini-video-mute'),
   miniVideoVolume: document.querySelector('#mini-video-volume'),
   miniVideoTime: document.querySelector('#mini-video-time'),
   miniVideoTitle: document.querySelector('#mini-video-title'),
@@ -107,6 +203,11 @@ const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(world, camera));
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.18, 0.24, 0.94);
 composer.addPass(bloomPass);
+// The dawn lighting is authored in linear HDR and needs a display transform
+// after bloom. Keep the other, independently tuned scenes on their current path.
+const dawnOutputPass = new OutputPass();
+dawnOutputPass.enabled = false;
+composer.addPass(dawnOutputPass);
 
 const clock = new THREE.Clock();
 const stage = new THREE.Group();
@@ -128,7 +229,8 @@ videoElement.setAttribute('aria-hidden', 'true');
 videoElement.className = 'mini-player__video';
 videoElement.controls = false;
 videoElement.tabIndex = -1;
-videoElement.volume = Number(dom.miniVideoVolume?.value ?? 0.85);
+let lastAudibleVolume = Number(dom.miniVideoVolume?.value ?? 0.85);
+videoElement.volume = lastAudibleVolume;
 dom.miniPlayer.prepend(videoElement);
 const cinemaLightCanvas = document.createElement('canvas');
 cinemaLightCanvas.width = 48;
@@ -160,6 +262,13 @@ videoTexture.generateMipmaps = false;
 let activeTexture = textureFallback;
 let sceneObjects = [];
 let realisticBeachWater = null;
+let realisticSeaPrism = null;
+let openSeaOrbitGroup = null;
+let openSeaOrbitAngle = 0;
+let openSeaOrbitTargetAngle = 0;
+let openSeaOrbitActualSpeed = 0;
+const openSeaOrbitSpeed = Math.PI * 2 / (16 * 60);
+const openSeaOrbitAxis = new THREE.Vector3(0, 1, 0);
 let realisticBeachEnvironment = null;
 let proceduralSandNoise = null;
 let proceduralSandTextures = null;
@@ -194,12 +303,62 @@ const beachLandDepth = 6500;
 const beachOceanWidth = 18000;
 const beachOceanDepth = 19500;
 const beachFloorHeight = -0.58;
-const openSeaInstallationCenterZ = -600;
-const openSeaInstallationCenterX = 328;
-const openSeaInstallationInnerRadius = 272;
-const openSeaInstallationOuterRadius = 336;
-const openSeaInstallationHeight = 300;
+const realisticSeaPrismEdgeRadius = 16;
+const realisticSeaPrismDepth = 120;
+const realisticSeaPrismSurfaceOverlap = 1.5;
+const realisticSeaPrismShoulderHighlightThreshold = 0.5;
+const realisticSeaPrismShoulderHighlightStrength = 1.15;
+const openSeaWaterSize = 40000;
+const openSeaWaterCenterZ = -openSeaWaterSize / 2 + 1.25;
+// Anchor the island and paired arcs to the circular sea's centre. Preserve
+// the original opening distance and view direction when moving the avatar.
+const openSeaInstallationCenterZ = openSeaWaterCenterZ;
+const realisticBeachStartZ = openSeaInstallationCenterZ + 1200;
+const openSeaDawnStartZ = openSeaInstallationCenterZ + 1730;
+// Keep the two installations closer together while scaling their radial
+// footprint with their height. This preserves the panoramic proportions of
+// the C-shaped video surfaces instead of making them simply taller.
+const openSeaInstallationCenterX = 240;
+const openSeaInstallationInnerRadius = 544;
+const openSeaInstallationOuterRadius = 672;
+const openSeaInstallationHeight = 600;
 const openSeaInstallationBaseY = beachFloorHeight - 0.16;
+const openSeaInstallationVideoFogStrength = 0.08;
+const openSeaInstallationBlockEnvironmentIntensity = 0.32;
+const openSeaLunarIslandRadiusX = 172;
+const openSeaLunarIslandRadiusZ = 132;
+const openSeaLunarIslandWaterY = beachFloorHeight - 0.08;
+const openSeaLunarIslandFlowerCount = 520;
+const openSeaLunarIslandProfile = [
+  { radius: 0, height: 7.4 },
+  { radius: 0.22, height: 7.05 },
+  { radius: 0.48, height: 5.75 },
+  { radius: 0.7, height: 3.45 },
+  { radius: 0.84, height: 1.35 },
+  { radius: 0.94, height: -0.12 },
+  { radius: 1, height: -1.35 },
+];
+// The reference demo places a compact, asset-based island in the scene center
+// and surrounds it with instanced rocks and vegetation. Keep the equivalent
+// landmark centered in the opening between our two installations.
+const openSeaIslandCenterX = 0;
+const openSeaIslandCenterZ = openSeaInstallationCenterZ;
+// The downloaded model has a pronounced arched underside. Sink it enough for
+// that underside to meet the water instead of only touching at its lowest tip.
+const openSeaIslandSubmergeDepth = 4.5;
+const openSeaIslandBaseY = beachFloorHeight - 0.22 - openSeaIslandSubmergeDepth;
+const openSeaIslandHeight = 52;
+const openSeaIslandCollisionRadius = 122;
+// Use the downloaded demo asset locally for this trial. The procedural island
+// remains available as an immediate fallback if the asset cannot be decoded.
+const openSeaIslandUseDownloadedAsset = true;
+const openSeaIslandAssetPath = '/assets/island.glb';
+const openSeaIslandAssetScale = 2.2;
+const openSeaIslandFlattenUnderside = true;
+const openSeaIslandFlattenHeight = 9;
+const openSeaIslandFlatBottomY = beachFloorHeight - 0.46;
+const realisticBeachFogColor = '#9aa5a8';
+const realisticBeachFogDensity = 0.00085;
 const realisticBeachHalfWidth = 6000;
 const realisticBeachLandDepth = 12000;
 const skyFloorHeight = -1.2;
@@ -227,6 +386,8 @@ let sceneTransitionToken = 0;
 let sceneTransitionTimer = 0;
 let luminousBubbleBodies = [];
 let butterflyDustObject = null;
+let openSeaIslandAssetLoadToken = 0;
+let openSeaIslandObject = null;
 const playerVelocity = new THREE.Vector3();
 const flashlightDirection = new THREE.Vector3();
 const cameraLookMatrix = new THREE.Matrix4();
@@ -243,10 +404,16 @@ let lastWPressTime = -Infinity;
 let forwardBoostActive = false;
 let forwardBoostFlutterRemaining = 0;
 let forwardBoostFlutterBlend = 0;
+let highSpeedMode = false;
+let highSpeedSequenceIndex = 0;
+let highSpeedSequenceLastInputTime = -Infinity;
 const sceneTransitionMinimumDuration = 560;
 const forwardBoostDoubleTapWindow = 280;
 const forwardBoostSpeedMultiplier = 2.15;
 const forwardBoostFlutterDuration = 0.82;
+const highSpeedSequence = ['6', '7', '6', '7'];
+const highSpeedSequenceWindow = 520;
+const highSpeedMultiplier = 7;
 
 world.add(stage, player, butterflyDustWorld);
 player.add(avatarRoot);
@@ -278,6 +445,17 @@ function buildInterface() {
     dom.sceneOptions.append(button);
     if (item.id === state.sceneId) button.classList.add('is-selected');
   });
+
+  openSeaModes.forEach((item) => {
+    const button = document.createElement('button');
+    button.className = 'choice-card choice-card--suboption';
+    button.dataset.id = item.id;
+    button.type = 'button';
+    button.innerHTML = `<span class="choice-card__icon">${item.icon}</span><span><strong>${item.label}</strong><small>${item.description}</small></span>`;
+    button.addEventListener('click', () => setOpenSeaMode(item.id));
+    dom.openSeaModeOptions.append(button);
+  });
+  updateOpenSeaModeUI();
 
   butterflyPalettes.forEach((item) => {
     const button = document.createElement('button');
@@ -324,15 +502,31 @@ function buildInterface() {
   });
   dom.miniVideoVolume.addEventListener('input', (event) => {
     const volume = THREE.MathUtils.clamp(Number(event.target.value), 0, 1);
+    if (volume > 0) lastAudibleVolume = volume;
     videoElement.muted = false;
     videoElement.volume = volume;
+    syncMiniVideoMuteControl();
+  });
+  dom.miniVideoMute.addEventListener('click', () => {
+    if (videoElement.muted) {
+      const volume = Number(dom.miniVideoVolume.value);
+      if (volume <= 0) {
+        const restoredVolume = THREE.MathUtils.clamp(lastAudibleVolume || 0.85, 0, 1);
+        dom.miniVideoVolume.value = String(restoredVolume);
+        videoElement.volume = restoredVolume;
+      }
+      videoElement.muted = false;
+    } else {
+      videoElement.muted = true;
+    }
+    syncMiniVideoMuteControl();
   });
   dom.miniVideoLoop.addEventListener('click', () => {
     videoElement.loop = !videoElement.loop;
     dom.miniVideoLoop.classList.toggle('is-active', videoElement.loop);
     dom.miniVideoLoop.setAttribute('aria-pressed', String(videoElement.loop));
   });
-  [dom.miniVideoSeek, dom.miniVideoLoop, dom.miniVideoVolume].forEach((control) => {
+  [dom.miniVideoSeek, dom.miniVideoLoop, dom.miniVideoMute, dom.miniVideoVolume].forEach((control) => {
     control.addEventListener('focus', clearMovementState);
     control.addEventListener('pointerdown', (event) => {
       event.stopPropagation();
@@ -355,6 +549,11 @@ function buildInterface() {
   window.addEventListener('keydown', (event) => {
     if (isTypingTarget(event.target)) return;
     const key = event.key.toLowerCase();
+    if (key === '6' || key === '7') {
+      updateHighSpeedSequence(key);
+      event.preventDefault();
+      return;
+    }
     if (key === 'f' && !event.repeat) {
       toggleFlashlight();
       event.preventDefault();
@@ -439,6 +638,28 @@ function clearMovementState() {
   forwardBoostActive = false;
   forwardBoostFlutterRemaining = 0;
   forwardBoostFlutterBlend = 0;
+  highSpeedSequenceIndex = 0;
+  highSpeedSequenceLastInputTime = -Infinity;
+}
+
+function updateHighSpeedSequence(key) {
+  const now = performance.now();
+  if (now - highSpeedSequenceLastInputTime > highSpeedSequenceWindow) {
+    highSpeedSequenceIndex = 0;
+  }
+
+  if (key === highSpeedSequence[highSpeedSequenceIndex]) {
+    highSpeedSequenceIndex += 1;
+  } else {
+    highSpeedSequenceIndex = key === highSpeedSequence[0] ? 1 : 0;
+  }
+  highSpeedSequenceLastInputTime = now;
+
+  if (highSpeedSequenceIndex === highSpeedSequence.length) {
+    highSpeedMode = !highSpeedMode;
+    highSpeedSequenceIndex = 0;
+    highSpeedSequenceLastInputTime = -Infinity;
+  }
 }
 
 function resetGamepadInput() {
@@ -505,6 +726,15 @@ function updateMiniPlayerToggle(isCollapsed) {
   dom.miniPlayerToggle.title = isCollapsed ? 'Show video preview' : 'Hide video preview';
 }
 
+function syncMiniVideoMuteControl() {
+  const isMuted = videoElement.muted;
+  dom.miniVideoMute.textContent = isMuted ? '🔇' : '🔊';
+  dom.miniVideoMute.classList.toggle('is-active', isMuted);
+  dom.miniVideoMute.setAttribute('aria-pressed', String(isMuted));
+  dom.miniVideoMute.setAttribute('aria-label', isMuted ? 'Unmute video' : 'Mute video');
+  dom.miniVideoMute.title = isMuted ? 'Unmute video' : 'Mute video';
+}
+
 function scheduleMiniPlayerDismissal() {
   miniPlayerDismissTimer = window.setTimeout(() => {
     if (dom.miniPlayer.classList.contains('is-collapsed')) dom.miniPlayer.classList.add('is-dismissed');
@@ -557,9 +787,32 @@ function updateFlashlight() {
   flashlightTarget.position.copy(camera.position).addScaledVector(flashlightDirection, 40);
 }
 
-function setScene(sceneId) {
+function updateOpenSeaModeUI() {
+  const isOpenSea = state.sceneId === 'realistic-beach';
+  dom.openSeaModes.hidden = !isOpenSea;
+  dom.openSeaModes.setAttribute('aria-hidden', String(!isOpenSea));
+  dom.openSeaModeOptions.querySelectorAll('[data-id]').forEach((button) => {
+    button.classList.toggle('is-selected', button.dataset.id === state.openSeaMode);
+  });
+}
+
+function setOpenSeaMode(modeId) {
+  if (!openSeaModes.some((mode) => mode.id === modeId)) return;
+  state.openSeaMode = modeId;
+  if (state.sceneId === 'realistic-beach') {
+    setScene('realistic-beach', { force: true });
+  } else {
+    updateOpenSeaModeUI();
+  }
+}
+
+function getOpenSeaAtmosphere() {
+  return openSeaAtmospheres[state.openSeaMode] ?? openSeaAtmospheres.dawn;
+}
+
+function setScene(sceneId, { force = false } = {}) {
   const scene = scenes.find((item) => item.id === sceneId);
-  if (!scene || (state.sceneId === sceneId && sceneObjects.length > 0)) return;
+  if (!scene || (!force && state.sceneId === sceneId && sceneObjects.length > 0)) return;
 
   const transitionToken = ++sceneTransitionToken;
   window.clearTimeout(sceneTransitionTimer);
@@ -593,6 +846,7 @@ function applyScene(sceneId) {
   const previousSceneId = state.sceneId;
   if (previousSceneId === 'youtube-cinema') destroyYouTubeScreen();
   realisticBeachWater = null;
+  realisticSeaPrism = null;
   if (realisticBeachEnvironment) {
     realisticBeachEnvironment.dispose();
     realisticBeachEnvironment = null;
@@ -601,17 +855,26 @@ function applyScene(sceneId) {
   state.sceneId = sceneId;
   const isCinema = ['cinema', 'youtube-cinema'].includes(sceneId);
   const isRealisticBeach = sceneId === 'realistic-beach';
-  ambientLight.intensity = isCinema ? 0 : isRealisticBeach ? 0.7 : 1.4;
-  moonLight.intensity = isCinema ? 0 : isRealisticBeach ? 0.35 : 2.2;
+  const atmosphere = isRealisticBeach ? getOpenSeaAtmosphere() : null;
+  dawnOutputPass.enabled = isRealisticBeach && state.openSeaMode === 'dawn';
+  ambientLight.color.set(atmosphere?.ambientColor ?? '#bcd3ff');
+  ambientLight.groundColor.set(atmosphere?.groundColor ?? '#121124');
+  moonLight.color.set(atmosphere?.moonColor ?? '#d5e4ff');
+  ambientLight.intensity = isCinema ? 0 : isRealisticBeach ? atmosphere.ambientIntensity : 1.4;
+  moonLight.intensity = isCinema ? 0 : isRealisticBeach ? atmosphere.moonIntensity : 2.2;
   cameraDistance = sceneId === 'sphere' ? 8.5 : sceneId === 'realistic-beach' ? 18 : ['cinema', 'youtube-cinema'].includes(sceneId) ? 8.3 : 9;
   if (sceneId === 'realistic-beach') {
-    yaw = 0;
-    pitch = 0.02;
-    player.position.set(0, beachFloorHeight + avatarFloorClearance, openSeaInstallationCenterZ);
-    renderer.toneMappingExposure = 0.9;
-    bloomPass.strength = 0;
-    bloomPass.radius = 0.18;
-    bloomPass.threshold = 0.96;
+    if (previousSceneId !== 'realistic-beach' || (sceneObjects.length === 0 && state.openSeaMode === 'dawn')) {
+      yaw = 0;
+      const isDawn = state.openSeaMode === 'dawn';
+      pitch = isDawn ? 0.24 : 0.02;
+      // Start near the central installation, well clear of the circular rim.
+      player.position.set(0, beachFloorHeight + avatarFloorClearance, isDawn ? openSeaDawnStartZ : realisticBeachStartZ);
+    }
+    renderer.toneMappingExposure = atmosphere.exposure;
+    bloomPass.strength = atmosphere.bloomStrength;
+    bloomPass.radius = atmosphere.bloomRadius;
+    bloomPass.threshold = atmosphere.bloomThreshold;
   } else if (sceneId === 'luminous') {
     yaw = 0;
     pitch = 0.12;
@@ -659,13 +922,34 @@ function applyScene(sceneId) {
   }
   updateButterflyWingDepthMode();
   document.querySelectorAll('#scene-options [data-id]').forEach((button) => button.classList.toggle('is-selected', button.dataset.id === sceneId));
+  updateOpenSeaModeUI();
+  if (sceneId === 'realistic-beach') updateCamera(0, true);
 }
 
 function clearScene() {
+  openSeaOrbitGroup = null;
+  openSeaCloudVolume?.dispose();
+  openSeaCloudVolume = null;
+  // Invalidate an in-flight GLB request before disposing the current scene.
+  // A late response must never resurrect an island after a scene switch.
+  openSeaIslandAssetLoadToken += 1;
+  openSeaIslandObject = null;
   sceneObjects.forEach((object) => {
+    const waterCapture = object.userData.realisticSeaPrism?.waterCapture;
+    if (waterCapture?.captureScene) {
+      const mirrorTexture = waterCapture.captureWater?.material?.uniforms?.mirrorSampler?.value;
+      mirrorTexture?.dispose?.();
+      waterCapture.captureScene.traverse((captureObject) => {
+        captureObject.geometry?.dispose?.();
+        captureObject.material?.dispose?.();
+      });
+      waterCapture.captureTarget?.dispose?.();
+      waterCapture.captureScene.clear();
+    }
     stage.remove(object);
     object.traverse((child) => {
       if (child.geometry) child.geometry.dispose();
+      if (child.isLight) child.shadow?.dispose();
       if (child.material && child.material !== materialForVideo()) {
         const materials = Array.isArray(child.material) ? child.material : [child.material];
         materials.forEach((material) => material.dispose?.());
@@ -673,6 +957,7 @@ function clearScene() {
     });
   });
   sceneObjects = [];
+  realisticSeaPrism = null;
 }
 
 function addToStage(object) {
@@ -867,23 +1152,41 @@ function buildBeachScene() {
 }
 
 function buildRealisticBeachScene() {
-  world.background.set('#8f9c99');
-  world.fog.color.set('#b9a38d');
-  world.fog.density = 0.00135;
-
-  const sky = new Sky();
-  sky.scale.setScalar(10000);
-  sky.material.uniforms.turbidity.value = 4.8;
-  sky.material.uniforms.rayleigh.value = 1.05;
-  sky.material.uniforms.mieCoefficient.value = 0.0024;
-  sky.material.uniforms.mieDirectionalG.value = 0.76;
+  const atmosphere = getOpenSeaAtmosphere();
+  world.background.set(atmosphere.background);
+  world.fog.color.set(atmosphere.fogColor);
+  world.fog.density = atmosphere.fogDensity;
 
   const sun = new THREE.Vector3();
-  const sunElevation = THREE.MathUtils.degToRad(5.5);
-  const sunAzimuth = THREE.MathUtils.degToRad(180);
+  const sunElevation = THREE.MathUtils.degToRad(atmosphere.sunElevation);
+  const sunAzimuth = THREE.MathUtils.degToRad(atmosphere.sunAzimuth);
   sun.setFromSphericalCoords(1, Math.PI / 2 - sunElevation, sunAzimuth);
-  sky.material.uniforms.sunPosition.value.copy(sun);
+  const sky = makeOpenSeaSky(atmosphere, sun);
   addToStage(sky);
+
+  if (state.openSeaMode === 'dawn') {
+    const sunlight = new THREE.DirectionalLight(atmosphere.sunColor, 2.6);
+    sunlight.name = 'Dawn sunlight';
+    sunlight.layers.enable(1);
+    sunlight.target.position.set(0, 250, openSeaInstallationCenterZ + 900);
+    sunlight.position.copy(sunlight.target.position).addScaledVector(sun, 5000);
+    sunlight.castShadow = true;
+    const solarShadowResolution = Math.min(4096, renderer.capabilities.maxTextureSize);
+    sunlight.shadow.mapSize.set(solarShadowResolution, solarShadowResolution);
+    // The rotating pair fits inside radius 912. Keep a fixed, tighter light
+    // frustum with margin for every orbit angle; moving the frustum with the
+    // arcs would introduce a second source of shadow-grid shimmering.
+    // A low dawn sun magnifies each vertical shadow texel across the water.
+    Object.assign(sunlight.shadow.camera, {
+      left: -1200, right: 1200, top: 850, bottom: -850,
+      near: 1, far: 10000,
+    });
+    sunlight.shadow.camera.updateProjectionMatrix();
+    sunlight.shadow.normalBias = 0.6;
+    sunlight.shadow.bias = -0.00003;
+    addToStage(sunlight.target);
+    addToStage(sunlight);
+  }
 
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
   realisticBeachEnvironment = pmremGenerator.fromScene(sky).texture;
@@ -892,46 +1195,1304 @@ function buildRealisticBeachScene() {
 
   // Extend the water beyond the camera far plane so its lateral and distant
   // edges never become visible during normal exploration.
-  const waterSize = 40000;
-  const waterNormals = new THREE.TextureLoader().load('https://threejs.org/examples/textures/waternormals.jpg', (texture) => {
+  const waterSize = openSeaWaterSize;
+  const waterSurfaceSize = waterSize - (realisticSeaPrismEdgeRadius - realisticSeaPrismSurfaceOverlap) * 2;
+  const waterNormals = new THREE.TextureLoader().load('/assets/textures/waternormals.jpg', (texture) => {
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
   });
-  realisticBeachWater = new Water(new THREE.PlaneGeometry(waterSize, waterSize, 256, 256), {
+  realisticBeachWater = new Water(new THREE.CircleGeometry(waterSurfaceSize / 2, 2048), {
     textureWidth: 512,
     textureHeight: 512,
     waterNormals,
     sunDirection: sun.clone().normalize(),
-    sunColor: 0xffc28b,
-    waterColor: 0x5f7775,
+    sunColor: atmosphere.sunColor,
+    waterColor: atmosphere.waterColor,
     distortionScale: 2.6,
     fog: true,
     alpha: 1,
+    side: THREE.DoubleSide,
   });
   realisticBeachWater.rotation.x = -Math.PI / 2;
-  realisticBeachWater.position.set(0, beachFloorHeight - 0.08, -waterSize / 2 + 1.25);
+  tuneDawnWater(realisticBeachWater, atmosphere);
+  realisticBeachWater.position.set(0, beachFloorHeight - 0.08, openSeaWaterCenterZ);
   realisticBeachWater.renderOrder = 1;
+  realisticBeachWater.receiveShadow = state.openSeaMode === 'dawn';
   addToStage(realisticBeachWater);
-
+  const prismWaterCapture = makeRealisticSeaSurfaceCapture({
+    waterNormals,
+    sunDirection: sun.clone().normalize(),
+    sunColor: atmosphere.sunColor,
+    waterColor: atmosphere.waterColor,
+    atmosphere,
+    waterSize,
+    edgeRadius: realisticSeaPrismEdgeRadius,
+  });
+  applyRealisticSeaWaterEdgeBlend({
+    water: realisticBeachWater,
+    captureTexture: prismWaterCapture.captureTarget.texture,
+    halfExtent: waterSurfaceSize / 2,
+    blendWidth: realisticSeaPrismEdgeRadius,
+  });
+  realisticSeaPrism = makeRealisticSeaPrism({
+    waterSize,
+    waterCenterZ: openSeaWaterCenterZ,
+    topY: beachFloorHeight - 0.08,
+    edgeRadius: realisticSeaPrismEdgeRadius,
+    waterMaterial: prismWaterCapture.material,
+    waterCapture: prismWaterCapture,
+  });
+  const waterBeforeRender = realisticBeachWater.onBeforeRender;
+  realisticBeachWater.onBeforeRender = function (...renderArguments) {
+    const prismWasVisible = realisticSeaPrism.visible;
+    // The Water shader renders a mirrored scene into its reflection target.
+    // Keep the prism out of that pass so its captured sea texture never feeds
+    // back into the reflection rendered for the upper surface.
+    realisticSeaPrism.visible = false;
+    try {
+      waterBeforeRender.call(this, ...renderArguments);
+    } finally {
+      realisticSeaPrism.visible = prismWasVisible;
+    }
+  };
+  addToStage(realisticSeaPrism);
+  if (atmosphere.stars) addOpenSeaStars();
   // Replace the single convex screen with two thick, mirrored C-shaped
   // installations lying in the water. Their curved footprint surrounds the
   // butterfly from the left and right, while the openings face one another.
   const installationArc = THREE.MathUtils.degToRad(180);
   const installationOptions = {
-    centerZ: openSeaInstallationCenterZ,
+    centerZ: 0,
     innerRadius: openSeaInstallationInnerRadius,
     outerRadius: openSeaInstallationOuterRadius,
     height: openSeaInstallationHeight,
     baseY: openSeaInstallationBaseY,
   };
+  openSeaOrbitGroup = new THREE.Group();
+  openSeaOrbitGroup.name = 'Orbiting Open Sea arcs';
+  openSeaOrbitGroup.position.z = openSeaInstallationCenterZ;
+  openSeaOrbitGroup.rotation.y = openSeaOrbitAngle;
   [
     { centerX: -openSeaInstallationCenterX, arcStart: Math.PI - installationArc / 2, arcEnd: Math.PI + installationArc / 2 },
     { centerX: openSeaInstallationCenterX, arcStart: -installationArc / 2, arcEnd: installationArc / 2 },
-  ].forEach((side) => addToStage(makeOpenSeaVideoInstallation({ ...installationOptions, ...side })));
+  ].forEach((side) => openSeaOrbitGroup.add(makeOpenSeaVideoInstallation({ ...installationOptions, ...side })));
+  addToStage(openSeaOrbitGroup);
+  addOpenSeaLunarTearIsland();
 
   // This version is open sea only: the water is the sole physical surface.
   // Keep the sky and the two horizontal video installations, but do not add
   // sand, a tide wash, shoreline foam, or a separate horizon plane.
+}
+
+function addOpenSeaLunarTearIsland() {
+  const island = makeOpenSeaLunarTearIsland();
+  island.position.set(0, openSeaLunarIslandWaterY, openSeaInstallationCenterZ);
+  openSeaIslandObject = island;
+  addToStage(island);
+}
+
+function makeOpenSeaLunarTearIsland() {
+  const random = createOpenSeaLunarIslandRandom();
+  const island = new THREE.Group();
+  island.name = 'Lunar Tear island';
+  island.add(makeOpenSeaLunarIslandTerrain(random));
+  island.add(makeOpenSeaLunarIslandRocks(random));
+  island.add(makeOpenSeaLunarIslandGroundCover(random));
+  island.add(makeOpenSeaLunarTearField(random));
+
+  const atmosphereStrength = state.openSeaMode === 'night' ? 42 : state.openSeaMode === 'dawn' ? 24 : 11;
+  const flowerLight = new THREE.PointLight('#fff2cf', atmosphereStrength, 250, 2);
+  flowerLight.position.set(0, 18, 0);
+  flowerLight.userData.openSeaLunarIslandLight = {
+    baseIntensity: atmosphereStrength,
+    phase: random() * Math.PI * 2,
+  };
+  island.add(flowerLight);
+  island.userData.openSeaLunarIsland = true;
+  return island;
+}
+
+function makeOpenSeaLunarIslandTerrain() {
+  const segments = 128;
+  const rings = [...openSeaLunarIslandProfile].reverse().filter((ring) => ring.radius > 0);
+  const positions = [];
+  const colors = [];
+  const indices = [];
+  const topColor = new THREE.Color('#3b4435');
+  const middleColor = new THREE.Color('#333a32');
+  const wetColor = new THREE.Color('#293937');
+
+  rings.forEach((ring) => {
+    for (let segment = 0; segment < segments; segment += 1) {
+      const angle = segment / segments * Math.PI * 2;
+      const edgeNoise = Math.sin(angle * 3 + 0.7) * 0.032
+        + Math.sin(angle * 7 - 1.1) * 0.018
+        + Math.sin(angle * 13 + 2.4) * 0.008;
+      const radiusScale = 1 + edgeNoise * THREE.MathUtils.lerp(0.32, 1, ring.radius);
+      const x = Math.cos(angle) * openSeaLunarIslandRadiusX * ring.radius * radiusScale;
+      const z = Math.sin(angle) * openSeaLunarIslandRadiusZ * ring.radius * radiusScale;
+      const surfaceNoise = openSeaLunarIslandSurfaceNoise(angle, ring.radius);
+      positions.push(x, ring.height + surfaceNoise, z);
+
+      const edgeBlend = THREE.MathUtils.smoothstep(ring.radius, 0.55, 1);
+      const middleBlend = THREE.MathUtils.smoothstep(ring.radius, 0.18, 0.72);
+      const color = topColor.clone().lerp(middleColor, middleBlend).lerp(wetColor, edgeBlend);
+      const colorNoise = Math.sin(x * 0.047 + z * 0.019) * 0.54
+        + Math.sin(z * 0.061 - x * 0.013) * 0.31;
+      color.offsetHSL(colorNoise * 0.006, colorNoise * 0.008, colorNoise * 0.018);
+      colors.push(color.r, color.g, color.b);
+    }
+  });
+
+  for (let ringIndex = 0; ringIndex < rings.length - 1; ringIndex += 1) {
+    for (let segment = 0; segment < segments; segment += 1) {
+      const nextSegment = (segment + 1) % segments;
+      const current = ringIndex * segments + segment;
+      const currentNext = ringIndex * segments + nextSegment;
+      const inner = (ringIndex + 1) * segments + segment;
+      const innerNext = (ringIndex + 1) * segments + nextSegment;
+      indices.push(current, inner, currentNext, currentNext, inner, innerNext);
+    }
+  }
+
+  const centerIndex = positions.length / 3;
+  positions.push(0, sampleOpenSeaLunarIslandProfile(0), 0);
+  colors.push(topColor.r, topColor.g, topColor.b);
+  const innerRingStart = (rings.length - 1) * segments;
+  for (let segment = 0; segment < segments; segment += 1) {
+    indices.push(innerRingStart + segment, centerIndex, innerRingStart + ((segment + 1) % segments));
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+
+  const terrain = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    emissive: '#101a15',
+    emissiveIntensity: 0.26,
+    roughness: 0.96,
+    metalness: 0.015,
+    envMapIntensity: 0.34,
+    side: THREE.DoubleSide,
+  }));
+  terrain.castShadow = true;
+  terrain.receiveShadow = true;
+  return terrain;
+}
+
+function makeOpenSeaLunarIslandRocks(random) {
+  const rockCount = 72;
+  const geometry = new THREE.DodecahedronGeometry(1, 0);
+  const material = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    color: '#ffffff',
+    emissive: '#111817',
+    emissiveIntensity: 0.18,
+    roughness: 0.87,
+    metalness: 0.04,
+    envMapIntensity: 0.42,
+    flatShading: true,
+  });
+  const rocks = new THREE.InstancedMesh(geometry, material, rockCount);
+  const palette = [
+    new THREE.Color('#43514b'),
+    new THREE.Color('#56594f'),
+    new THREE.Color('#655f54'),
+    new THREE.Color('#354945'),
+  ];
+  const instance = new THREE.Object3D();
+
+  for (let index = 0; index < rockCount; index += 1) {
+    const angle = random() * Math.PI * 2;
+    const radius = index < 52
+      ? THREE.MathUtils.lerp(0.83, 0.985, random())
+      : THREE.MathUtils.lerp(0.3, 0.79, random());
+    const x = Math.cos(angle) * openSeaLunarIslandRadiusX * radius;
+    const z = Math.sin(angle) * openSeaLunarIslandRadiusZ * radius;
+    const scale = index < 52
+      ? THREE.MathUtils.lerp(1.5, 4.5, random())
+      : THREE.MathUtils.lerp(0.8, 2.4, random());
+    const verticalScale = scale * THREE.MathUtils.lerp(0.42, 0.74, random());
+    instance.position.set(
+      x,
+      getOpenSeaLunarIslandSurfaceOffset(x, z) + verticalScale * 0.46,
+      z,
+    );
+    instance.rotation.set(
+      THREE.MathUtils.lerp(-0.22, 0.22, random()),
+      random() * Math.PI * 2,
+      THREE.MathUtils.lerp(-0.22, 0.22, random()),
+    );
+    instance.scale.set(scale * THREE.MathUtils.lerp(0.82, 1.35, random()), verticalScale, scale);
+    instance.updateMatrix();
+    rocks.setMatrixAt(index, instance.matrix);
+    rocks.setColorAt(index, palette[Math.floor(random() * palette.length)]);
+  }
+  rocks.instanceMatrix.needsUpdate = true;
+  rocks.instanceColor.needsUpdate = true;
+  rocks.castShadow = true;
+  rocks.receiveShadow = true;
+  rocks.frustumCulled = false;
+  return rocks;
+}
+
+function makeOpenSeaLunarIslandGroundCover(random) {
+  const leafCount = 1400;
+  const geometry = makeOpenSeaLunarPetalGeometry();
+  const material = new THREE.MeshStandardMaterial({
+    color: '#ffffff',
+    vertexColors: true,
+    emissive: '#0b1711',
+    emissiveIntensity: 0.36,
+    roughness: 0.96,
+    metalness: 0,
+    side: THREE.DoubleSide,
+  });
+  const leaves = new THREE.InstancedMesh(geometry, material, leafCount);
+  const palette = [
+    new THREE.Color('#233b2d'),
+    new THREE.Color('#2c4635'),
+    new THREE.Color('#1d3328'),
+    new THREE.Color('#354b38'),
+  ];
+  const instance = new THREE.Object3D();
+  for (let index = 0; index < leafCount; index += 1) {
+    const radius = Math.sqrt(random()) * 0.86;
+    const angle = random() * Math.PI * 2;
+    const x = Math.cos(angle) * openSeaLunarIslandRadiusX * radius;
+    const z = Math.sin(angle) * openSeaLunarIslandRadiusZ * radius;
+    const scale = THREE.MathUtils.lerp(0.72, 1.38, random());
+    instance.position.set(x, getOpenSeaLunarIslandSurfaceOffset(x, z) + 0.08, z);
+    instance.rotation.set(
+      THREE.MathUtils.lerp(-0.06, 0.06, random()),
+      random() * Math.PI * 2,
+      THREE.MathUtils.lerp(-0.14, 0.14, random()),
+    );
+    instance.scale.set(scale * THREE.MathUtils.lerp(0.82, 1.28, random()), scale, scale);
+    instance.updateMatrix();
+    leaves.setMatrixAt(index, instance.matrix);
+    leaves.setColorAt(index, palette[Math.floor(random() * palette.length)]);
+  }
+  leaves.instanceMatrix.needsUpdate = true;
+  leaves.instanceColor.needsUpdate = true;
+  leaves.receiveShadow = true;
+  leaves.frustumCulled = false;
+  leaves.renderOrder = 3;
+  return leaves;
+}
+
+function makeOpenSeaLunarTearField(random) {
+  const field = new THREE.Group();
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  const flowers = [];
+  for (let index = 0; index < openSeaLunarIslandFlowerCount; index += 1) {
+    const normalizedRadius = Math.min(
+      0.82,
+      Math.sqrt((index + random() * 0.85) / openSeaLunarIslandFlowerCount) * 0.82,
+    );
+    const angle = index * goldenAngle + THREE.MathUtils.lerp(-0.36, 0.36, random());
+    const x = Math.cos(angle) * openSeaLunarIslandRadiusX * normalizedRadius;
+    const z = Math.sin(angle) * openSeaLunarIslandRadiusZ * normalizedRadius;
+    flowers.push({
+      x,
+      z,
+      groundY: getOpenSeaLunarIslandSurfaceOffset(x, z),
+      stemHeight: THREE.MathUtils.lerp(3.6, 6.2, random()) * THREE.MathUtils.lerp(1.06, 0.9, normalizedRadius),
+      scale: THREE.MathUtils.lerp(1.4, 2.08, random()),
+      rotation: random() * Math.PI * 2,
+      colorIndex: Math.floor(random() * 3),
+    });
+  }
+
+  const petalGeometry = makeOpenSeaLunarPetalGeometry();
+  const stemGeometry = new THREE.CylinderGeometry(0.11, 0.15, 1, 5, 5);
+  const centerGeometry = new THREE.SphereGeometry(0.26, 8, 6);
+  const petalMaterial = new THREE.MeshStandardMaterial({
+    color: '#fffdf4',
+    emissive: '#fff4d8',
+    emissiveIntensity: state.openSeaMode === 'night' ? 3.4 : state.openSeaMode === 'dawn' ? 0.85 : 1.15,
+    roughness: 0.7,
+    metalness: 0,
+    vertexColors: true,
+    side: THREE.DoubleSide,
+  });
+  const centerMaterial = new THREE.MeshBasicMaterial({
+    color: '#fff3bd',
+    toneMapped: false,
+  });
+  const stemMaterial = new THREE.MeshStandardMaterial({
+    color: '#294637',
+    roughness: 0.94,
+    metalness: 0,
+  });
+  const leafMaterial = new THREE.MeshStandardMaterial({
+    color: '#172d24',
+    emissive: '#08140f',
+    emissiveIntensity: 0.28,
+    roughness: 0.96,
+    metalness: 0,
+    side: THREE.DoubleSide,
+  });
+  const petalPalette = [
+    new THREE.Color('#fffdf4'),
+    new THREE.Color('#f4fbf5'),
+    new THREE.Color('#fff7df'),
+  ];
+  applyOpenSeaLunarInstancedWind(petalMaterial, 'petal', 0.98);
+  applyOpenSeaLunarInstancedWind(centerMaterial, 'whole', 0.98);
+  applyOpenSeaLunarInstancedWind(stemMaterial, 'stem', 0.98);
+  applyOpenSeaLunarInstancedWind(leafMaterial, 'leaf', 0.98);
+  const baseGlowOpacity = state.openSeaMode === 'night' ? 0.25 : state.openSeaMode === 'dawn' ? 0.14 : 0.07;
+
+  for (let layerIndex = 0; layerIndex < 3; layerIndex += 1) {
+    const layerFlowers = flowers.filter((_, flowerIndex) => flowerIndex % 3 === layerIndex);
+    const petals = new THREE.InstancedMesh(petalGeometry, petalMaterial, layerFlowers.length * 5);
+    const centers = new THREE.InstancedMesh(centerGeometry, centerMaterial, layerFlowers.length);
+    const stems = new THREE.InstancedMesh(stemGeometry, stemMaterial, layerFlowers.length);
+    const leaves = new THREE.InstancedMesh(petalGeometry, leafMaterial, layerFlowers.length * 2);
+    const glowPositions = new Float32Array(layerFlowers.length * 3);
+    const instance = new THREE.Object3D();
+
+    layerFlowers.forEach((flower, flowerIndex) => {
+      const blossomY = flower.groundY + flower.stemHeight;
+      instance.position.set(flower.x, flower.groundY + flower.stemHeight * 0.5, flower.z);
+      instance.rotation.set(0, flower.rotation, 0);
+      instance.scale.set(flower.scale, flower.stemHeight, flower.scale);
+      instance.updateMatrix();
+      stems.setMatrixAt(flowerIndex, instance.matrix);
+
+      for (let leafIndex = 0; leafIndex < 2; leafIndex += 1) {
+        const leafAngle = flower.rotation + leafIndex * Math.PI + THREE.MathUtils.lerp(-0.45, 0.45, random());
+        const leafHeight = flower.groundY + flower.stemHeight * THREE.MathUtils.lerp(0.22, 0.48, random());
+        instance.position.set(flower.x, leafHeight, flower.z);
+        instance.rotation.set(0, leafAngle, leafIndex === 0 ? -0.1 : 0.1);
+        instance.scale.setScalar(flower.scale * THREE.MathUtils.lerp(0.58, 0.82, random()));
+        instance.updateMatrix();
+        leaves.setMatrixAt(flowerIndex * 2 + leafIndex, instance.matrix);
+      }
+
+      for (let petalIndex = 0; petalIndex < 5; petalIndex += 1) {
+        const petalAngle = flower.rotation + petalIndex / 5 * Math.PI * 2;
+        instance.position.set(flower.x, blossomY, flower.z);
+        instance.rotation.set(0, petalAngle, THREE.MathUtils.lerp(-0.045, 0.045, random()));
+        instance.scale.setScalar(flower.scale * THREE.MathUtils.lerp(0.9, 1.08, random()));
+        instance.updateMatrix();
+        const petalInstanceIndex = flowerIndex * 5 + petalIndex;
+        petals.setMatrixAt(petalInstanceIndex, instance.matrix);
+        petals.setColorAt(petalInstanceIndex, petalPalette[flower.colorIndex]);
+      }
+
+      instance.position.set(flower.x, blossomY + flower.scale * 0.16, flower.z);
+      instance.rotation.set(0, 0, 0);
+      instance.scale.setScalar(flower.scale);
+      instance.updateMatrix();
+      centers.setMatrixAt(flowerIndex, instance.matrix);
+      glowPositions[flowerIndex * 3] = flower.x;
+      glowPositions[flowerIndex * 3 + 1] = blossomY + flower.scale * 0.3;
+      glowPositions[flowerIndex * 3 + 2] = flower.z;
+    });
+
+    [petals, centers, stems, leaves].forEach((mesh) => {
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.frustumCulled = false;
+    });
+    petals.instanceColor.needsUpdate = true;
+    petals.renderOrder = 5;
+    centers.renderOrder = 6;
+
+    const glowGeometry = new THREE.BufferGeometry();
+    glowGeometry.setAttribute('position', new THREE.BufferAttribute(glowPositions, 3));
+    const glowMaterial = new THREE.PointsMaterial({
+      color: '#fff4d8',
+      map: luminousGlowTexture,
+      size: state.openSeaMode === 'night' ? 10 : 8.2,
+      opacity: baseGlowOpacity,
+      transparent: true,
+      alphaTest: 0.015,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+      sizeAttenuation: true,
+    });
+    applyOpenSeaLunarPointWind(glowMaterial, 0.98);
+    const glow = new THREE.Points(glowGeometry, glowMaterial);
+    glow.frustumCulled = false;
+    glow.renderOrder = 7;
+
+    const layer = new THREE.Group();
+    layer.add(stems, leaves, petals, centers, glow);
+    layer.userData.openSeaLunarFlowerLayer = {
+      phase: layerIndex / 3 * Math.PI * 2,
+      glow,
+      baseGlowOpacity,
+    };
+    field.add(layer);
+  }
+  return field;
+}
+
+function openSeaLunarWindShaderPreamble(amplitude) {
+  return `
+    uniform float uOpenSeaLunarWindTime;
+
+    vec3 openSeaLunarWindOffset(vec3 anchor, float response) {
+      float primaryPhase = uOpenSeaLunarWindTime * 0.74 + anchor.x * 0.038 + anchor.z * 0.027;
+      float secondaryPhase = uOpenSeaLunarWindTime * 0.31 - anchor.x * 0.013 + anchor.z * 0.019 + 1.7;
+      float broadWave = sin(primaryPhase) * 0.72 + sin(secondaryPhase) * 0.28;
+      float crossWave = sin(primaryPhase * 0.53 + secondaryPhase * 0.37 + 2.4);
+      float gust = 0.78 + sin(uOpenSeaLunarWindTime * 0.17 + anchor.x * 0.006 - anchor.z * 0.004) * 0.22;
+      vec3 direction = vec3(
+        broadWave * 0.88 + crossWave * 0.12,
+        sin(primaryPhase + 1.1) * 0.07,
+        broadWave * 0.34 + crossWave * 0.16
+      );
+      return direction * ${amplitude.toFixed(3)} * response * gust;
+    }
+  `;
+}
+
+function applyOpenSeaLunarInstancedWind(material, mode, amplitude) {
+  const response = {
+    stem: 'pow(clamp(position.y + 0.5, 0.0, 1.0), 1.65)',
+    petal: '1.0 + clamp(position.z / 2.36, 0.0, 1.0) * 0.12',
+    leaf: '0.28 + clamp(position.z / 2.36, 0.0, 1.0) * 0.08',
+    whole: '1.0',
+  }[mode] ?? '1.0';
+  const windState = { shader: null };
+  material.userData.openSeaLunarWind = windState;
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uOpenSeaLunarWindTime = { value: 0 };
+    windState.shader = shader;
+    shader.vertexShader = shader.vertexShader
+      .replace('void main() {', `${openSeaLunarWindShaderPreamble(amplitude)}\nvoid main() {`)
+      .replace('#include <project_vertex>', `
+        vec4 mvPosition = vec4(transformed, 1.0);
+
+        #ifdef USE_BATCHING
+          mvPosition = batchingMatrix * mvPosition;
+        #endif
+
+        #ifdef USE_INSTANCING
+          vec3 openSeaLunarWindAnchor = instanceMatrix[3].xyz;
+          float openSeaLunarWindResponse = ${response};
+          mvPosition = instanceMatrix * mvPosition;
+          mvPosition.xyz += openSeaLunarWindOffset(openSeaLunarWindAnchor, openSeaLunarWindResponse);
+        #endif
+
+        mvPosition = modelViewMatrix * mvPosition;
+        gl_Position = projectionMatrix * mvPosition;
+      `)
+      .replace('#include <worldpos_vertex>', `
+        #if defined(USE_ENVMAP) || defined(DISTANCE) || defined(USE_SHADOWMAP) || defined(USE_TRANSMISSION) || NUM_SPOT_LIGHT_COORDS > 0
+          vec4 worldPosition = vec4(transformed, 1.0);
+
+          #ifdef USE_BATCHING
+            worldPosition = batchingMatrix * worldPosition;
+          #endif
+
+          #ifdef USE_INSTANCING
+            vec3 openSeaLunarWorldWindAnchor = instanceMatrix[3].xyz;
+            float openSeaLunarWorldWindResponse = ${response};
+            worldPosition = instanceMatrix * worldPosition;
+            worldPosition.xyz += openSeaLunarWindOffset(openSeaLunarWorldWindAnchor, openSeaLunarWorldWindResponse);
+          #endif
+
+          worldPosition = modelMatrix * worldPosition;
+        #endif
+      `);
+  };
+  material.customProgramCacheKey = () => `open-sea-lunar-wind-${mode}-${amplitude}`;
+}
+
+function applyOpenSeaLunarPointWind(material, amplitude) {
+  const windState = { shader: null };
+  material.userData.openSeaLunarWind = windState;
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uOpenSeaLunarWindTime = { value: 0 };
+    windState.shader = shader;
+    shader.vertexShader = shader.vertexShader
+      .replace('void main() {', `${openSeaLunarWindShaderPreamble(amplitude)}\nvoid main() {`)
+      .replace('#include <begin_vertex>', `
+        vec3 transformed = vec3(position);
+        transformed += openSeaLunarWindOffset(position, 1.0);
+      `);
+  };
+  material.customProgramCacheKey = () => `open-sea-lunar-point-wind-${amplitude}`;
+}
+
+function makeOpenSeaLunarPetalGeometry() {
+  const sections = [
+    { distance: 0, width: 0.04, height: 0 },
+    { distance: 0.28, width: 0.34, height: 0.08 },
+    { distance: 0.72, width: 0.66, height: 0.2 },
+    { distance: 1.22, width: 0.78, height: 0.31 },
+    { distance: 1.72, width: 0.62, height: 0.35 },
+    { distance: 2.12, width: 0.32, height: 0.28 },
+    { distance: 2.36, width: 0.02, height: 0.2 },
+  ];
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+  sections.forEach((section, index) => {
+    positions.push(-section.width, section.height, section.distance);
+    positions.push(section.width, section.height, section.distance);
+    const v = index / (sections.length - 1);
+    uvs.push(0, v, 1, v);
+  });
+  for (let index = 0; index < sections.length - 1; index += 1) {
+    const current = index * 2;
+    const next = current + 2;
+    indices.push(current, next + 1, current + 1, current, next, next + 1);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function sampleOpenSeaLunarIslandProfile(normalizedRadius) {
+  const radius = THREE.MathUtils.clamp(normalizedRadius, 0, 1);
+  for (let index = 1; index < openSeaLunarIslandProfile.length; index += 1) {
+    const previous = openSeaLunarIslandProfile[index - 1];
+    const next = openSeaLunarIslandProfile[index];
+    if (radius > next.radius) continue;
+    const blend = THREE.MathUtils.smootherstep(radius, previous.radius, next.radius);
+    return THREE.MathUtils.lerp(previous.height, next.height, blend);
+  }
+  return openSeaLunarIslandProfile[openSeaLunarIslandProfile.length - 1].height;
+}
+
+function openSeaLunarIslandSurfaceNoise(angle, normalizedRadius) {
+  const centerFade = THREE.MathUtils.smoothstep(normalizedRadius, 0.04, 0.28);
+  const edgeFade = 1 - THREE.MathUtils.smoothstep(normalizedRadius, 0.78, 1);
+  return (
+    Math.sin(angle * 5 + normalizedRadius * 11.2) * 0.17
+    + Math.sin(angle * 11 - normalizedRadius * 7.4) * 0.08
+  ) * centerFade * edgeFade;
+}
+
+function getOpenSeaLunarIslandSurfaceOffset(localX, localZ) {
+  const normalizedX = localX / openSeaLunarIslandRadiusX;
+  const normalizedZ = localZ / openSeaLunarIslandRadiusZ;
+  const normalizedRadius = Math.hypot(normalizedX, normalizedZ);
+  const angle = Math.atan2(normalizedZ, normalizedX);
+  return sampleOpenSeaLunarIslandProfile(normalizedRadius)
+    + openSeaLunarIslandSurfaceNoise(angle, normalizedRadius);
+}
+
+function getOpenSeaLunarIslandFloorHeight(x, z) {
+  if (!openSeaIslandObject || state.sceneId !== 'realistic-beach') return null;
+  const localX = x - openSeaIslandObject.position.x;
+  const localZ = z - openSeaIslandObject.position.z;
+  const normalizedRadius = Math.hypot(
+    localX / openSeaLunarIslandRadiusX,
+    localZ / openSeaLunarIslandRadiusZ,
+  );
+  if (normalizedRadius >= 0.955) return null;
+  const islandSurface = openSeaIslandObject.position.y + getOpenSeaLunarIslandSurfaceOffset(localX, localZ);
+  return islandSurface > beachFloorHeight ? islandSurface : null;
+}
+
+function getOpenSeaFloorHeightAt(x, z) {
+  return Math.max(beachFloorHeight, getOpenSeaLunarIslandFloorHeight(x, z) ?? beachFloorHeight);
+}
+
+function createOpenSeaLunarIslandRandom() {
+  let seed = 0x91e10da5;
+  return () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+}
+
+function addOpenSeaIsland() {
+  if (!openSeaIslandUseDownloadedAsset) {
+    addOpenSeaProceduralIsland();
+    return;
+  }
+
+  addOpenSeaIslandAsset();
+}
+
+function addOpenSeaProceduralIsland() {
+  const island = makeOpenSeaIsland();
+  island.position.set(openSeaIslandCenterX, openSeaIslandBaseY, openSeaIslandCenterZ);
+  openSeaIslandObject = island;
+  addToStage(island);
+}
+
+function addOpenSeaIslandAsset() {
+  const loadToken = ++openSeaIslandAssetLoadToken;
+  const dracoLoader = new DRACOLoader();
+  dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+
+  const loader = new GLTFLoader();
+  loader.setDRACOLoader(dracoLoader);
+  loader.load(
+    openSeaIslandAssetPath,
+    (gltf) => {
+      dracoLoader.dispose();
+      if (loadToken !== openSeaIslandAssetLoadToken || state.sceneId !== 'realistic-beach') {
+        disposeOpenSeaIslandAsset(gltf.scene);
+        return;
+      }
+
+      const island = gltf.scene;
+      island.rotation.x = Math.PI / 2;
+      island.rotation.y = -Math.PI;
+      island.scale.setScalar(openSeaIslandAssetScale);
+      island.updateMatrixWorld(true);
+
+      const bounds = new THREE.Box3().setFromObject(island);
+      island.position.set(
+        openSeaIslandCenterX,
+        openSeaIslandBaseY - bounds.min.y + 0.02,
+        openSeaIslandCenterZ,
+      );
+      if (openSeaIslandFlattenUnderside) flattenOpenSeaIslandUnderside(island);
+      island.traverse((object) => {
+        if (!object.isMesh) return;
+        object.castShadow = true;
+        object.receiveShadow = true;
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        materials.forEach((material) => {
+          if (material.map) material.map.colorSpace = THREE.SRGBColorSpace;
+          material.side = THREE.DoubleSide;
+          if (material.transparent || material.alphaTest > 0 || material.name?.toLowerCase().includes('blaetter')) {
+            material.transparent = true;
+            material.alphaTest = Math.max(material.alphaTest || 0, 0.18);
+            material.depthWrite = true;
+          }
+          material.needsUpdate = true;
+        });
+      });
+
+      openSeaIslandObject = island;
+      addToStage(island);
+    },
+    undefined,
+    (error) => {
+      dracoLoader.dispose();
+      console.warn('Open Sea island asset could not be loaded; using procedural fallback.', error);
+      if (loadToken === openSeaIslandAssetLoadToken && state.sceneId === 'realistic-beach') {
+        addOpenSeaProceduralIsland();
+      }
+    },
+  );
+}
+
+function flattenOpenSeaIslandUnderside(island) {
+  // The downloaded model's main ground mesh is named Plane. Work in world
+  // space so this remains correct even if the asset's source-up axis changes,
+  // then convert the edited vertices back to their mesh-local coordinates.
+  island.updateMatrixWorld(true);
+  island.traverse((object) => {
+    if (!object.isMesh) return;
+    const position = object.geometry?.attributes?.position;
+    if (!position) return;
+    object.geometry.computeBoundingBox();
+    const localSize = object.geometry.boundingBox.getSize(new THREE.Vector3());
+    const isMainIslandSurface = object.name === 'Plane'
+      || (position.count > 7000 && localSize.x > 70 && localSize.y > 70);
+    if (!isMainIslandSurface) return;
+
+    const matrixWorld = object.matrixWorld.clone();
+    const matrixWorldInverse = matrixWorld.clone().invert();
+    const vertex = new THREE.Vector3();
+    let changed = false;
+    for (let index = 0; index < position.count; index += 1) {
+      vertex.fromBufferAttribute(position, index).applyMatrix4(matrixWorld);
+      const distanceFromFlatBottom = vertex.y - openSeaIslandFlatBottomY;
+      if (distanceFromFlatBottom >= openSeaIslandFlattenHeight) continue;
+
+      const blend = THREE.MathUtils.smoothstep(
+        THREE.MathUtils.clamp(distanceFromFlatBottom, 0, openSeaIslandFlattenHeight),
+        0,
+        openSeaIslandFlattenHeight,
+      );
+      vertex.y = THREE.MathUtils.lerp(openSeaIslandFlatBottomY, vertex.y, blend);
+      vertex.applyMatrix4(matrixWorldInverse);
+      position.setXYZ(index, vertex.x, vertex.y, vertex.z);
+      changed = true;
+    }
+
+    if (changed) {
+      position.needsUpdate = true;
+      object.geometry.computeVertexNormals();
+      object.geometry.computeBoundingBox();
+      object.geometry.computeBoundingSphere();
+    }
+  });
+}
+
+function disposeOpenSeaIslandAsset(object) {
+  object.traverse((child) => {
+    child.geometry?.dispose();
+    const materials = child.material
+      ? (Array.isArray(child.material) ? child.material : [child.material])
+      : [];
+    materials.forEach((material) => {
+      material.map?.dispose();
+      material.normalMap?.dispose();
+      material.roughnessMap?.dispose();
+      material.metalnessMap?.dispose();
+      material.emissiveMap?.dispose();
+      material.dispose?.();
+    });
+  });
+}
+
+function makeOpenSeaIsland() {
+  const island = new THREE.Group();
+  island.add(makeOpenSeaIslandTerrain());
+  island.add(makeOpenSeaIslandSandSurface());
+
+  const rockGeometry = new THREE.DodecahedronGeometry(1, 0);
+  const rockMaterial = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.88,
+    metalness: 0.04,
+    flatShading: true,
+  });
+  const rocks = new THREE.InstancedMesh(rockGeometry, rockMaterial, 36);
+  const rockPalette = [
+    new THREE.Color('#8f7960'),
+    new THREE.Color('#b39a78'),
+    new THREE.Color('#756b62'),
+    new THREE.Color('#c3aa82'),
+  ];
+  const grassGeometry = new THREE.ConeGeometry(1, 1, 5, 1);
+  const grassMaterial = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.96,
+    metalness: 0,
+    flatShading: true,
+  });
+  const grass = new THREE.InstancedMesh(grassGeometry, grassMaterial, 38);
+  const grassPalette = [
+    new THREE.Color('#5d783b'),
+    new THREE.Color('#718c43'),
+    new THREE.Color('#4d6e3b'),
+  ];
+  const instance = new THREE.Object3D();
+  const random = createOpenSeaIslandRandom();
+
+  for (let index = 0; index < rocks.count; index += 1) {
+    const angle = random() * Math.PI * 2;
+    const onIsland = random() > 0.28;
+    const radius = onIsland
+      ? THREE.MathUtils.lerp(26, 126, random())
+      : THREE.MathUtils.lerp(142, 174, random());
+    const scale = THREE.MathUtils.lerp(2.2, 6.8, random());
+    instance.position.set(
+      Math.cos(angle) * radius,
+      onIsland ? THREE.MathUtils.lerp(17, 23, random()) : THREE.MathUtils.lerp(0.7, 3.1, random()),
+      Math.sin(angle) * radius * 0.88,
+    );
+    instance.rotation.set(
+      random() * 0.35,
+      random() * Math.PI * 2,
+      random() * 0.35,
+    );
+    instance.scale.set(scale * 1.15, scale * THREE.MathUtils.lerp(0.55, 0.92, random()), scale);
+    instance.updateMatrix();
+    rocks.setMatrixAt(index, instance.matrix);
+    rocks.setColorAt(index, rockPalette[Math.floor(random() * rockPalette.length)]);
+  }
+  rocks.castShadow = true;
+  rocks.receiveShadow = true;
+  rocks.instanceColor.needsUpdate = true;
+  island.add(rocks);
+
+  for (let index = 0; index < grass.count; index += 1) {
+    const angle = random() * Math.PI * 2;
+    const radius = THREE.MathUtils.lerp(22, 82, random());
+    const height = THREE.MathUtils.lerp(4, 10, random());
+    instance.position.set(
+      Math.cos(angle) * radius,
+      THREE.MathUtils.lerp(20, 24, random()) + height * 0.5,
+      Math.sin(angle) * radius * 0.86,
+    );
+    instance.rotation.set(
+      THREE.MathUtils.randFloat(-0.28, 0.28),
+      random() * Math.PI * 2,
+      THREE.MathUtils.randFloat(-0.28, 0.28),
+    );
+    instance.scale.set(
+      THREE.MathUtils.lerp(0.8, 1.7, random()),
+      height,
+      THREE.MathUtils.lerp(0.8, 1.7, random()),
+    );
+    instance.updateMatrix();
+    grass.setMatrixAt(index, instance.matrix);
+    grass.setColorAt(index, grassPalette[Math.floor(random() * grassPalette.length)]);
+  }
+  grass.castShadow = true;
+  grass.receiveShadow = true;
+  grass.instanceColor.needsUpdate = true;
+  island.add(grass);
+
+  [
+    { x: -48, z: -22, scale: 1.08 },
+    { x: -8, z: -46, scale: 1.02 },
+    { x: 43, z: -18, scale: 0.92 },
+    { x: 28, z: 34, scale: 0.84 },
+    { x: -30, z: 38, scale: 0.76 },
+  ].forEach((palmPosition) => {
+    const palm = makeOpenSeaPalm(palmPosition.scale, random);
+    palm.position.set(palmPosition.x, THREE.MathUtils.lerp(20.5, 22.2, random()), palmPosition.z);
+    palm.rotation.y = random() * Math.PI * 2;
+    island.add(palm);
+  });
+
+  const foam = new THREE.Mesh(
+    new THREE.RingGeometry(140, 158, 96),
+    new THREE.MeshBasicMaterial({
+      color: '#eaf4e8',
+      transparent: true,
+      opacity: 0.3,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  foam.rotation.x = -Math.PI / 2;
+  foam.position.y = 0.08;
+  foam.renderOrder = 4;
+  foam.userData.openSeaIslandFoam = {
+    baseOpacity: 0.3,
+    phase: createOpenSeaIslandRandom() * Math.PI * 2,
+  };
+  island.add(foam);
+
+  island.userData.openSeaIsland = true;
+  return island;
+}
+
+function makeOpenSeaIslandTerrain() {
+  const segments = 18;
+  const rings = [
+    { radius: 148, y: 0 },
+    { radius: 142, y: 6 },
+    { radius: 126, y: 12 },
+    { radius: 96, y: 18 },
+    { radius: 62, y: 21 },
+  ];
+  const palette = [
+    new THREE.Color('#40565a'),
+    new THREE.Color('#5c6662'),
+    new THREE.Color('#77766b'),
+    new THREE.Color('#8b816e'),
+  ];
+  const positions = [];
+  const colors = [];
+  const indices = [];
+  const random = createOpenSeaIslandRandom();
+
+  rings.forEach((ring, ringIndex) => {
+    for (let segment = 0; segment < segments; segment += 1) {
+      const angle = (segment / segments) * Math.PI * 2;
+      const jitter = THREE.MathUtils.lerp(0.92, 1.08, random());
+      const radius = ring.radius * jitter;
+      const irregularity = 1 + Math.sin(angle * 3 + ringIndex * 0.8) * 0.045;
+      positions.push(
+        Math.cos(angle) * radius * irregularity,
+        ring.y,
+        Math.sin(angle) * radius * 0.88 * irregularity,
+      );
+      const color = palette[Math.min(ringIndex, palette.length - 1)].clone();
+      color.offsetHSL(THREE.MathUtils.lerp(-0.018, 0.018, random()), 0, THREE.MathUtils.lerp(-0.035, 0.035, random()));
+      colors.push(color.r, color.g, color.b);
+    }
+  });
+
+  for (let ringIndex = 0; ringIndex < rings.length - 1; ringIndex += 1) {
+    for (let segment = 0; segment < segments; segment += 1) {
+      const nextSegment = (segment + 1) % segments;
+      const current = ringIndex * segments + segment;
+      const currentNext = ringIndex * segments + nextSegment;
+      const next = (ringIndex + 1) * segments + segment;
+      const nextNext = (ringIndex + 1) * segments + nextSegment;
+      indices.push(current, currentNext, next, currentNext, nextNext, next);
+    }
+  }
+
+  const topCenterIndex = positions.length / 3;
+  positions.push(0, 22, 0);
+  colors.push(0.49, 0.45, 0.36);
+  const topRingStart = (rings.length - 1) * segments;
+  for (let segment = 0; segment < segments; segment += 1) {
+    indices.push(topRingStart + segment, topRingStart + ((segment + 1) % segments), topCenterIndex);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  const material = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.93,
+    metalness: 0.02,
+    flatShading: true,
+  });
+  const terrain = new THREE.Mesh(geometry, material);
+  terrain.castShadow = true;
+  terrain.receiveShadow = true;
+  return terrain;
+}
+
+function makeOpenSeaIslandSandSurface() {
+  const segments = 48;
+  const rings = [
+    { radius: 138, y: 14 },
+    { radius: 130, y: 17 },
+    { radius: 110, y: 20.5 },
+    { radius: 76, y: 23 },
+    { radius: 32, y: 24 },
+  ];
+  const positions = [];
+  const colors = [];
+  const uvs = [];
+  const indices = [];
+  const random = createOpenSeaIslandRandom();
+  const drySand = new THREE.Color('#e2c99a');
+  const warmSand = new THREE.Color('#c9a77a');
+
+  rings.forEach((ring, ringIndex) => {
+    for (let segment = 0; segment < segments; segment += 1) {
+      const angle = (segment / segments) * Math.PI * 2;
+      const jitter = THREE.MathUtils.lerp(0.94, 1.06, random());
+      const radius = ring.radius * jitter;
+      const irregularity = 1 + Math.sin(angle * 4 + 0.6) * 0.035 + Math.sin(angle * 7 - 1.2) * 0.018;
+      const x = Math.cos(angle) * radius * irregularity;
+      const z = Math.sin(angle) * radius * 0.86 * irregularity;
+      positions.push(x, ring.y, z);
+      uvs.push(x / 138 + 0.5, z / 118 + 0.5);
+      const edgeBlend = THREE.MathUtils.smoothstep(ringIndex, 0, rings.length - 1);
+      const color = warmSand.clone().lerp(drySand, 1 - edgeBlend * 0.58);
+      color.offsetHSL(THREE.MathUtils.lerp(-0.012, 0.012, random()), 0, THREE.MathUtils.lerp(-0.028, 0.028, random()));
+      colors.push(color.r, color.g, color.b);
+    }
+  });
+
+  for (let ringIndex = 0; ringIndex < rings.length - 1; ringIndex += 1) {
+    for (let segment = 0; segment < segments; segment += 1) {
+      const nextSegment = (segment + 1) % segments;
+      const current = ringIndex * segments + segment;
+      const currentNext = ringIndex * segments + nextSegment;
+      const next = (ringIndex + 1) * segments + segment;
+      const nextNext = (ringIndex + 1) * segments + nextSegment;
+      indices.push(current, next, currentNext, currentNext, next, nextNext);
+    }
+  }
+
+  const centerIndex = positions.length / 3;
+  positions.push(0, 24.5, 0);
+  uvs.push(0.5, 0.5);
+  colors.push(drySand.r, drySand.g, drySand.b);
+  const topRingStart = (rings.length - 1) * segments;
+  for (let segment = 0; segment < segments; segment += 1) {
+    indices.push(topRingStart + segment, centerIndex, topRingStart + ((segment + 1) % segments));
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  const textures = getProceduralSandTextures();
+  const sand = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+    color: '#ffffff',
+    vertexColors: true,
+    roughness: 0.92,
+    roughnessMap: textures.roughness,
+    normalMap: textures.normal,
+    normalScale: new THREE.Vector2(0.22, 0.22),
+    metalness: 0,
+    side: THREE.DoubleSide,
+  }));
+  sand.castShadow = true;
+  sand.receiveShadow = true;
+  sand.renderOrder = 2;
+  return sand;
+}
+
+function makeOpenSeaPalm(scale, random) {
+  const palm = new THREE.Group();
+  const trunk = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.46, 0.78, 9.5, 8, 3),
+    new THREE.MeshStandardMaterial({
+      color: '#79684b',
+      roughness: 0.93,
+      metalness: 0,
+      flatShading: true,
+    }),
+  );
+  trunk.position.y = 4.75;
+  trunk.rotation.z = THREE.MathUtils.lerp(-0.1, 0.1, random());
+  trunk.rotation.x = THREE.MathUtils.lerp(-0.06, 0.06, random());
+  trunk.castShadow = true;
+  trunk.receiveShadow = true;
+  palm.add(trunk);
+
+  const leafShape = new THREE.Shape();
+  leafShape.moveTo(0, 0);
+  leafShape.bezierCurveTo(1.25, 0.58, 3.05, 0.75, 4.9, 0.12);
+  leafShape.bezierCurveTo(3.05, -0.32, 1.25, -0.28, 0, 0);
+  const leafGeometry = new THREE.ShapeGeometry(leafShape, 6);
+  const leafMaterial = new THREE.MeshStandardMaterial({
+    color: '#5f7d3d',
+    roughness: 0.9,
+    metalness: 0,
+    side: THREE.DoubleSide,
+  });
+  const crown = new THREE.Group();
+  crown.position.y = 9.35;
+  palm.add(crown);
+  for (let index = 0; index < 8; index += 1) {
+    const leaf = new THREE.Mesh(leafGeometry, leafMaterial);
+    leaf.rotation.set(
+      -Math.PI / 2 + THREE.MathUtils.lerp(-0.18, 0.18, random()),
+      (index / 8) * Math.PI * 2,
+      THREE.MathUtils.lerp(-0.12, 0.12, random()),
+    );
+    leaf.scale.setScalar(THREE.MathUtils.lerp(0.72, 1.04, random()));
+    leaf.userData.openSeaIslandPalmLeaf = {
+      baseRotationX: leaf.rotation.x,
+      baseRotationZ: leaf.rotation.z,
+      phase: random() * Math.PI * 2,
+    };
+    leaf.renderOrder = 2;
+    crown.add(leaf);
+  }
+  palm.scale.setScalar(scale);
+  palm.userData.openSeaIslandPalm = true;
+  return palm;
+}
+
+function createOpenSeaIslandRandom() {
+  let seed = 0x6d2b79f5;
+  return () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+}
+
+function makeRealisticSeaPrism({ waterSize, waterCenterZ, topY, edgeRadius, waterMaterial, waterCapture }) {
+  // Revolve an open-topped profile: the circular Water surface owns the cap.
+  // Rounded shoulders retain the softened transition without a coplanar lid.
+  const radius = waterSize / 2;
+  const halfDepth = realisticSeaPrismDepth / 2;
+  const profile = [new THREE.Vector2(0, -halfDepth)];
+  for (let i = 0; i <= 16; i += 1) {
+    const angle = -Math.PI / 2 + (i / 16) * Math.PI / 2;
+    profile.push(new THREE.Vector2(
+      radius - edgeRadius + Math.cos(angle) * edgeRadius,
+      -halfDepth + edgeRadius + Math.sin(angle) * edgeRadius,
+    ));
+  }
+  for (let i = 0; i <= 16; i += 1) {
+    const angle = (i / 16) * Math.PI / 2;
+    profile.push(new THREE.Vector2(
+      radius - edgeRadius + Math.cos(angle) * edgeRadius,
+      halfDepth - edgeRadius + Math.sin(angle) * edgeRadius,
+    ));
+  }
+  const geometry = new THREE.LatheGeometry(profile, 2048);
+  const body = new THREE.Mesh(geometry, waterMaterial);
+  body.position.set(0, topY - realisticSeaPrismDepth / 2, waterCenterZ);
+  body.renderOrder = 2;
+
+  const prism = new THREE.Group();
+  prism.add(body);
+  prism.userData.realisticSeaPrism = {
+    material: waterMaterial,
+    depth: realisticSeaPrismDepth,
+    waterCapture,
+  };
+  return prism;
+}
+
+function makeRealisticSeaSurfaceCapture({
+  waterNormals,
+  sunDirection,
+  sunColor,
+  waterColor,
+  atmosphere,
+  waterSize,
+  edgeRadius,
+}) {
+  // A vertical Water plane behaves like a mirror aimed at the horizon. Capture
+  // a genuine horizontal sample instead and project that moving result onto the
+  // prism walls, making their look independent of face orientation.
+  const captureScene = new THREE.Scene();
+  captureScene.background = new THREE.Color(atmosphere.background);
+  captureScene.fog = new THREE.FogExp2(atmosphere.fogColor, atmosphere.fogDensity);
+
+  const captureSky = makeOpenSeaSky(atmosphere, sunDirection);
+  captureScene.add(captureSky);
+
+  const captureWater = new Water(new THREE.PlaneGeometry(420, 420), {
+    textureWidth: 256,
+    textureHeight: 256,
+    waterNormals,
+    sunDirection,
+    sunColor,
+    waterColor,
+    distortionScale: 2.6,
+    fog: true,
+    alpha: 1,
+    side: THREE.DoubleSide,
+  });
+  captureWater.rotation.x = -Math.PI / 2;
+  tuneDawnWater(captureWater, atmosphere);
+  captureScene.add(captureWater);
+
+  const captureCamera = new THREE.PerspectiveCamera(42, 1, 0.1, 1600);
+  captureCamera.position.set(0, 58, 78);
+  captureCamera.lookAt(0, 0, -18);
+  captureCamera.updateMatrixWorld();
+
+  const captureTarget = new THREE.WebGLRenderTarget(512, 512, {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    depthBuffer: true,
+  });
+  captureTarget.texture.name = 'OpenSeaPrismWaterCapture';
+  captureTarget.texture.wrapS = THREE.MirroredRepeatWrapping;
+  captureTarget.texture.wrapT = THREE.MirroredRepeatWrapping;
+  captureTarget.texture.generateMipmaps = false;
+  captureTarget.texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+
+  const material = new THREE.MeshBasicMaterial({
+    map: captureTarget.texture,
+    side: THREE.DoubleSide,
+    // The captured Water pass already contains the active atmosphere. Applying
+    // the main scene fog again here would wash the moving detail out twice.
+    fog: false,
+    toneMapped: false,
+  });
+  material.name = 'OpenSeaPrismCapturedWaterMaterial';
+  const capturedPatchWorldSize = 160;
+  const triplanarScale = (1 / capturedPatchWorldSize).toFixed(8);
+  const innerHalfExtent = (waterSize / 2 - edgeRadius).toFixed(3);
+  const prismTopLocalY = (realisticSeaPrismDepth / 2).toFixed(3);
+  const shoulderHighlightThreshold = realisticSeaPrismShoulderHighlightThreshold.toFixed(2);
+  const shoulderHighlightStrength = realisticSeaPrismShoulderHighlightStrength.toFixed(2);
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec3 vWaterLocalPosition;\nvarying vec3 vWaterLocalNormal;',
+      )
+      .replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>\nvWaterLocalPosition = position;\nvWaterLocalNormal = normal;',
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nvarying vec3 vWaterLocalPosition;\nvarying vec3 vWaterLocalNormal;',
+      )
+      .replace(
+        '#include <map_fragment>',
+        [
+          '#ifdef USE_MAP',
+          `  float foldedDepth = max( 0.0, ${prismTopLocalY} - vWaterLocalPosition.y );`,
+          `  vec2 waterTopCoordinates = vWaterLocalPosition.xz;`,
+          '  vec3 waterNormal = normalize( vWaterLocalNormal );',
+          '  vec2 radialDirection = waterTopCoordinates / max( length( waterTopCoordinates ), 0.0001 );',
+          `  vec2 foldedCoordinates = radialDirection * ( ${innerHalfExtent} + foldedDepth );`,
+          '  float topWeight = smoothstep( 0.0, 1.0, max( waterNormal.y, 0.0 ) );',
+          '  vec2 waterCoordinates = mix( foldedCoordinates, waterTopCoordinates, topWeight );',
+          `  vec4 sampledDiffuseColor = texture2D( map, waterCoordinates * ${triplanarScale} + vec2( 0.43, 0.23 ) );`,
+          '  float shoulderHighlightSoftening = smoothstep( 0.15, 0.92, max( waterNormal.y, 0.0 ) );',
+          '  float shoulderLuminance = dot( sampledDiffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );',
+          `  float shoulderHighlightScale = 1.0 / ( 1.0 + max( shoulderLuminance - ${shoulderHighlightThreshold}, 0.0 ) * ${shoulderHighlightStrength} );`,
+          '  vec3 softenedShoulderColor = sampledDiffuseColor.rgb * shoulderHighlightScale;',
+          '  sampledDiffuseColor.rgb = mix( sampledDiffuseColor.rgb, softenedShoulderColor, shoulderHighlightSoftening );',
+          '  diffuseColor *= sampledDiffuseColor;',
+          '#endif',
+        ].join('\n'),
+      );
+  };
+  material.customProgramCacheKey = () => 'open-sea-rounded-cylinder-folded-water-v1';
+  material.needsUpdate = true;
+  return {
+    captureScene,
+    captureCamera,
+    captureWater,
+    captureTarget,
+    material,
+  };
+}
+
+function applyRealisticSeaWaterEdgeBlend({ water, captureTexture, halfExtent, blendWidth }) {
+  const capturedPatchWorldSize = 160;
+  const captureScale = (1 / capturedPatchWorldSize).toFixed(8);
+  const shoulderHighlightThreshold = realisticSeaPrismShoulderHighlightThreshold.toFixed(2);
+  const shoulderHighlightStrength = realisticSeaPrismShoulderHighlightStrength.toFixed(2);
+  water.material.uniforms.edgeWaterSampler = { value: captureTexture };
+  water.material.uniforms.edgeWaterHalfExtent = { value: halfExtent };
+  water.material.uniforms.edgeWaterBlendWidth = { value: blendWidth };
+  water.material.vertexShader = water.material.vertexShader
+    .replace(
+      'varying vec4 worldPosition;',
+      'varying vec4 worldPosition;\nvarying vec2 edgeWaterCoordinates;',
+    )
+    .replace(
+      'worldPosition = mirrorCoord.xyzw;',
+      'worldPosition = mirrorCoord.xyzw;\nedgeWaterCoordinates = vec2( position.x, -position.y );',
+    );
+  water.material.fragmentShader = water.material.fragmentShader
+    .replace(
+      'uniform vec3 waterColor;',
+      'uniform vec3 waterColor;\nuniform sampler2D edgeWaterSampler;\nuniform float edgeWaterHalfExtent;\nuniform float edgeWaterBlendWidth;',
+    )
+    .replace(
+      'varying vec4 worldPosition;',
+      'varying vec4 worldPosition;\nvarying vec2 edgeWaterCoordinates;',
+    )
+    .replace(
+      '#include <fog_fragment>',
+      [
+        '#include <fog_fragment>',
+        'float edgeWaterDistance = edgeWaterHalfExtent - length( edgeWaterCoordinates );',
+        'float edgeWaterBlendBase = 1.0 - smoothstep( 0.0, edgeWaterBlendWidth, max( edgeWaterDistance, 0.0 ) );',
+        'float edgeWaterBlendSquared = edgeWaterBlendBase * edgeWaterBlendBase;',
+        'float edgeWaterBlend = edgeWaterBlendSquared * edgeWaterBlendSquared;',
+        'if ( edgeWaterBlend > 0.0 ) {',
+        `  vec3 edgeWaterColor = texture2D( edgeWaterSampler, edgeWaterCoordinates * ${captureScale} + vec2( 0.43, 0.23 ) ).rgb;`,
+        '  float edgeWaterLuminance = dot( edgeWaterColor, vec3( 0.2126, 0.7152, 0.0722 ) );',
+        `  float edgeWaterHighlightScale = 1.0 / ( 1.0 + max( edgeWaterLuminance - ${shoulderHighlightThreshold}, 0.0 ) * ${shoulderHighlightStrength} );`,
+        '  edgeWaterColor *= edgeWaterHighlightScale;',
+        '  vec3 edgeWaterOutputColor = linearToOutputTexel( vec4( edgeWaterColor, 1.0 ) ).rgb;',
+        '  gl_FragColor.rgb = mix( gl_FragColor.rgb, edgeWaterOutputColor, edgeWaterBlend );',
+        '}',
+      ].join('\n'),
+    );
+  water.material.needsUpdate = true;
+}
+
+function updateRealisticSeaPrismTexture(elapsedTime) {
+  const waterCapture = realisticSeaPrism?.userData.realisticSeaPrism?.waterCapture;
+  if (!waterCapture) return;
+  waterCapture.captureWater.material.uniforms.time.value = elapsedTime;
+  const previousRenderTarget = renderer.getRenderTarget();
+  renderer.setRenderTarget(waterCapture.captureTarget);
+  renderer.clear();
+  renderer.render(waterCapture.captureScene, waterCapture.captureCamera);
+  renderer.setRenderTarget(previousRenderTarget);
 }
 
 function makeOpenSeaVideoInstallation({ centerX, centerZ, innerRadius, outerRadius, height, baseY, arcStart, arcEnd }) {
@@ -967,17 +2528,21 @@ function makeOpenSeaVideoInstallation({ centerX, centerZ, innerRadius, outerRadi
   const block = new THREE.Mesh(blockGeometry, new THREE.MeshPhysicalMaterial({
     // Keep the structural block untextured. The video is rendered once on
     // each face below; mapping it here as well would create depth conflicts.
-    color: '#a7bcba',
+    color: state.openSeaMode === 'dawn' ? '#8696ac' : '#a7bcba',
     roughness: 0.42,
     metalness: 0.16,
     clearcoat: 0.36,
     clearcoatRoughness: 0.24,
+    envMapIntensity: openSeaInstallationBlockEnvironmentIntensity,
     side: THREE.DoubleSide,
   }));
   block.castShadow = true;
   block.receiveShadow = true;
 
-  const installationSurfaceOffset = 1.2;
+  // All skins must share the block's exact boundary vertices. Offsetting each
+  // face along its own normal separates the caps from the curved walls.
+  // The video material's polygonOffset handles depth separation instead.
+  const installationSurfaceOffset = 0;
   // Run the curved video layers all the way into the end caps so the
   // structural material cannot show through at the joins.
   const installationEdgeAngleInset = 0;
@@ -1046,12 +2611,22 @@ function makeOpenSeaVideoInstallation({ centerX, centerZ, innerRadius, outerRadi
   const installation = new THREE.Group();
   installation.position.set(centerX, baseY, centerZ);
   installation.add(block, topVideo, bottomVideo, innerEdgeVideo, outerEdgeVideo, startCapVideo, endCapVideo);
+  for (const face of [topVideo, bottomVideo, innerEdgeVideo, outerEdgeVideo, startCapVideo, endCapVideo]) {
+    face.receiveShadow = state.openSeaMode === 'dawn';
+  }
   return installation;
 }
 
 function openSeaInstallationVideoMaterial() {
-  return new THREE.MeshBasicMaterial({
+  const isDawn = state.openSeaMode === 'dawn';
+  const Material = isDawn ? THREE.MeshStandardMaterial : THREE.MeshBasicMaterial;
+  const material = new Material({
     map: activeTexture,
+    ...(isDawn ? {
+      color: '#c1c5cc', roughness: 0.68, metalness: 0.05,
+      emissive: '#ffffff', emissiveMap: activeTexture, emissiveIntensity: 0.08,
+      envMapIntensity: 0.35,
+    } : {}),
     side: THREE.DoubleSide,
     // The video is opaque, so keep depth writes enabled and avoid transparent
     // sorting. This makes each video face a single stable depth layer.
@@ -1060,8 +2635,22 @@ function openSeaInstallationVideoMaterial() {
     polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -4,
-    toneMapped: false,
+    toneMapped: isDawn,
+    fog: true,
   });
+  material.userData.openSeaVideoSurface = true;
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "float fogFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );",
+        `float fogFactor = (1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth )) * ${openSeaInstallationVideoFogStrength.toFixed(2)};`,
+      )
+      .replace(
+        "float fogFactor = smoothstep( fogNear, fogFar, vFogDepth );",
+        `float fogFactor = smoothstep( fogNear, fogFar, vFogDepth ) * ${openSeaInstallationVideoFogStrength.toFixed(2)};`,
+      );
+  };
+  return material;
 }
 
 function makeInstallationEndVideoGeometry(innerRadius, outerRadius, height, angle, offsetDirection, offset) {
@@ -1213,6 +2802,7 @@ function curvedBeachVideoMaterial(surfaceAspect) {
 function beachSunMaterial() {
   return new THREE.ShaderMaterial({
     transparent: true,
+    depthTest: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     toneMapped: false,
@@ -1675,6 +3265,86 @@ function addSunReflectionPath(centerX) {
     group.add(reflection);
   }
   addToStage(group);
+}
+
+function addOpenSeaStars() {
+  const count = 320;
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const starPalette = [
+    new THREE.Color('#fff8e9'),
+    new THREE.Color('#d8e8ff'),
+    new THREE.Color('#f1d9ff'),
+  ];
+  for (let index = 0; index < count; index += 1) {
+    positions[index * 3] = THREE.MathUtils.randFloatSpread(5200);
+    positions[index * 3 + 1] = THREE.MathUtils.randFloat(18, 520);
+    positions[index * 3 + 2] = THREE.MathUtils.randFloat(-5200, 1400);
+    const color = starPalette[index % starPalette.length];
+    colors[index * 3] = color.r;
+    colors[index * 3 + 1] = color.g;
+    colors[index * 3 + 2] = color.b;
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  const stars = new THREE.Points(geometry, new THREE.PointsMaterial({
+    vertexColors: true,
+    size: 0.22,
+    transparent: true,
+    opacity: 0.88,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true,
+  }));
+  stars.renderOrder = 1;
+  stars.userData.openSeaStars = { baseOpacity: 0.88, phase: Math.random() * Math.PI * 2 };
+  addToStage(stars);
+}
+
+function suppressSkySunDisk(sky) {
+  const sunDiskSource = 'L0 += ( vSunE * 19000.0 * Fex ) * sundisk;';
+  if (!sky.material.fragmentShader.includes(sunDiskSource)) return;
+  sky.material.fragmentShader = sky.material.fragmentShader.replace(sunDiskSource, 'L0 += vec3(0.0);');
+  sky.material.needsUpdate = true;
+}
+
+function makeOpenSeaSky(atmosphere, sunDirection) {
+  if (atmosphere === openSeaAtmospheres.dawn) {
+    const volumetric = new URLSearchParams(window.location.search).get('clouds') !== 'flat';
+    if (volumetric && !openSeaCloudVolume) {
+      const requestedQuality = new URLSearchParams(window.location.search).get('cloud-quality');
+      const quality = ['low', 'reference'].includes(requestedQuality) ? requestedQuality : 'high';
+      openSeaCloudVolume = createCloudVolume(sunDirection, openSeaSkyTime, { quality });
+      openSeaCloudVolume.update(renderer, camera, true);
+    }
+    return makeDawnSky(sunDirection, openSeaSkyTime, { cloudVolume: openSeaCloudVolume, viewCamera: camera });
+  }
+  const sky = new Sky();
+  sky.scale.setScalar(10000);
+  for (const [key, value] of Object.entries(atmosphere.sky)) {
+    sky.material.uniforms[key].value = value;
+  }
+  sky.material.uniforms.sunPosition.value.copy(sunDirection);
+  suppressSkySunDisk(sky);
+  return sky;
+}
+
+function tuneDawnWater(water, atmosphere) {
+  naturalizeWater(water);
+  if (atmosphere !== openSeaAtmospheres.dawn) return;
+  water.material.uniforms.size.value = 7.0;
+  water.material.uniforms.sunColor.value.multiplyScalar(1.6);
+  // Shadow only direct solar illumination. Reflected sky and water scatter
+  // remain visible in shade; never add unshadowed glints behind an occluder.
+  water.material.fragmentShader = water.material.fragmentShader
+    .replace('float rf0 = 0.3;', 'float rf0 = 0.02;')
+    .replace(
+      'vec3 albedo = mix( ( sunColor * diffuseLight * 0.3 + scatter ) * getShadowMask(), ( vec3( 0.1 ) + reflectionSample * 0.9 + reflectionSample * specularLight ), reflectance);',
+      'float solarVisibility = getShadowMask();\nvec3 albedo = mix( scatter + diffuseLight * 0.3 * solarVisibility, reflectionSample, reflectance);',
+    )
+    .replace('vec3 outgoingLight = albedo;',
+      'vec3 outgoingLight = albedo + specularLight * 0.65 * solarVisibility;');
 }
 
 function addBeachStars() {
@@ -2797,12 +4467,14 @@ function syncMiniVideoControls() {
   dom.miniVideoSeek.disabled = !duration;
   dom.miniVideoSeek.value = duration ? String((currentTime / duration) * 100) : '0';
   dom.miniVideoTime.textContent = `${formatMiniVideoTime(currentTime)} / ${formatMiniVideoTime(duration)}`;
+  syncMiniVideoMuteControl();
 }
 
 function resetMiniVideoControls() {
   dom.miniVideoSeek.disabled = true;
   dom.miniVideoSeek.value = '0';
   dom.miniVideoTime.textContent = '0:00 / 0:00';
+  syncMiniVideoMuteControl();
 }
 
 function refreshVideoMaterials() {
@@ -2811,6 +4483,9 @@ function refreshVideoMaterials() {
     if (object.material.map) {
       if (object.material.map.isVideoTexture || object.material.map === textureFallback) object.material.map = activeTexture;
       object.material.needsUpdate = true;
+    }
+    if (object.material.userData.openSeaVideoSurface && object.material.emissiveMap) {
+      object.material.emissiveMap = activeTexture;
     }
     if (object.material.uniforms?.uMap) {
       object.material.uniforms.uMap.value = activeTexture;
@@ -2831,6 +4506,7 @@ function setAvatar() {
     });
   }
   buildButterfly();
+  applyButterflySceneStyle();
   avatarRoot.traverse((object) => object.layers.enable(1));
   updateButterflyWingDepthMode();
   document.querySelectorAll('#butterfly-palette [data-id]').forEach((button) => button.classList.toggle('is-selected', button.dataset.id === state.butterflyColorId));
@@ -2914,6 +4590,10 @@ function applyButterflySceneStyle() {
     if (!object.material?.userData?.butterflyWingFill) return;
     object.material.opacity = style.opacity;
     object.material.transmission = style.transmission;
+    const isDawn = state.sceneId === 'realistic-beach' && state.openSeaMode === 'dawn';
+    object.material.emissiveIntensity = isDawn ? 0.18 : 0.58;
+    object.material.toneMapped = isDawn;
+    object.receiveShadow = isDawn;
     object.material.needsUpdate = true;
   });
 }
@@ -2921,12 +4601,20 @@ function applyButterflySceneStyle() {
 function updateButterflyWingDepthMode() {
   const prioritizeWings = ['realistic-beach', 'cinema', 'youtube-cinema'].includes(state.sceneId);
   avatarRoot.traverse((object) => {
+    if (object.userData.butterflyWingOccluder) {
+      // Keep a colorless depth silhouette in front of transparent scene lights.
+      // This prevents the beach sun from showing through the translucent wings
+      // while preserving the wings' visible fill and glow.
+      object.visible = prioritizeWings;
+      object.renderOrder = prioritizeWings ? 98 : 0;
+      return;
+    }
     const material = object.material;
     if (!material?.userData?.butterflyWingPriority) return;
     material.depthTest = !prioritizeWings;
     material.depthWrite = false;
     material.needsUpdate = true;
-    object.renderOrder = prioritizeWings ? 100 : (object.isLine ? 22 : 20);
+    object.renderOrder = prioritizeWings ? (object.isLine ? 102 : 100) : (object.isLine ? 22 : 20);
   });
 }
 
@@ -3022,6 +4710,14 @@ function buildButterfly() {
     toneMapped: false,
     fog: false,
   });
+  const wingOccluderMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    colorWrite: false,
+    depthTest: true,
+    depthWrite: true,
+    side: THREE.DoubleSide,
+    fog: false,
+  });
   const dustPerimeter = [];
 
   [-1, 1].forEach((side) => {
@@ -3056,6 +4752,12 @@ function buildButterfly() {
       wing.position.z = index === 0 ? 0 : 0.015;
       wing.renderOrder = 20;
 
+      const wingOccluder = new THREE.Mesh(wing.geometry, wingOccluderMaterial);
+      wingOccluder.position.copy(wing.position);
+      wingOccluder.userData.butterflyWingOccluder = true;
+      wingOccluder.visible = false;
+      wingOccluder.renderOrder = 98;
+
       const outlinePoints = shape.getPoints(72).map((point) => new THREE.Vector3(point.x, point.y, 0.035));
       outlinePoints.forEach((point) => {
         const x = point.x * side;
@@ -3067,6 +4769,7 @@ function buildButterfly() {
       outline.renderOrder = 22;
       (index === 0 ? upperWing : lowerWing).add(outline);
       (index === 0 ? upperWing : lowerWing).add(wing);
+      (index === 0 ? upperWing : lowerWing).add(wingOccluder);
     });
 
     const veinPaths = [
@@ -3560,6 +5263,7 @@ async function playVideoWithAudio() {
   if (state.sceneId === 'youtube-cinema') {
     videoElement.muted = true;
     videoElement.volume = 0;
+    syncMiniVideoMuteControl();
     if (youtubePlayerReady && youtubePlayer?.playVideo) {
       youtubePlayer.setVolume(85);
       youtubePlayer.playVideo();
@@ -3571,6 +5275,7 @@ async function playVideoWithAudio() {
     return;
   }
   videoElement.muted = false;
+  syncMiniVideoMuteControl();
   const selectedVolume = Number(dom.miniVideoVolume?.value);
   videoElement.volume = Number.isFinite(selectedVolume) ? THREE.MathUtils.clamp(selectedVolume, 0, 1) : 0.85;
   try {
@@ -3638,7 +5343,8 @@ function updatePlayer(delta) {
   if (direction.lengthSq()) {
     direction.normalize();
     const isForwardBoosting = forwardBoostActive && keys.has('w');
-    const movementSpeed = isForwardBoosting ? 6.5 * forwardBoostSpeedMultiplier : 6.5;
+    const baseMovementSpeed = isForwardBoosting ? 6.5 * forwardBoostSpeedMultiplier : 6.5;
+    const movementSpeed = baseMovementSpeed * (highSpeedMode ? highSpeedMultiplier : 1);
     playerVelocity.copy(direction).multiplyScalar(movementSpeed);
     player.position.addScaledVector(playerVelocity, delta);
     if (state.sceneId === 'sphere') {
@@ -3659,8 +5365,14 @@ function updatePlayer(delta) {
       }
       player.position.y = THREE.MathUtils.clamp(player.position.y, -cylinderHalfHeight + cylinderAvatarMargin, cylinderHalfHeight - cylinderAvatarMargin);
     } else if (state.sceneId === 'realistic-beach') {
-      player.position.x = THREE.MathUtils.clamp(player.position.x, -3000, 3000);
-      player.position.z = THREE.MathUtils.clamp(player.position.z, -3000, 3000);
+      const offsetZ = player.position.z - openSeaWaterCenterZ;
+      const radius = openSeaWaterSize / 2 - realisticSeaPrismEdgeRadius - getAvatarCollisionRadius();
+      const distance = Math.hypot(player.position.x, offsetZ);
+      if (distance > radius) {
+        const scale = radius / distance;
+        player.position.x *= scale;
+        player.position.z = openSeaWaterCenterZ + offsetZ * scale;
+      }
     } else if (state.sceneId === 'sky') {
       player.position.x = THREE.MathUtils.clamp(player.position.x, -16, 16);
       player.position.z = THREE.MathUtils.clamp(player.position.z, -24, 24);
@@ -3691,7 +5403,12 @@ function updatePlayer(delta) {
 
 function applyPlayerFloorCollision() {
   if (state.sceneId === 'realistic-beach') {
-    player.position.y = THREE.MathUtils.clamp(player.position.y, beachFloorHeight + avatarFloorClearance, 250);
+    const localFloor = getOpenSeaFloorHeightAt(player.position.x, player.position.z);
+    player.position.y = THREE.MathUtils.clamp(
+      player.position.y,
+      localFloor + avatarFloorClearance,
+      openSeaInstallationBaseY + (openSeaInstallationHeight - 50) * 2,
+    );
   } else if (state.sceneId === 'sky') {
     player.position.y = THREE.MathUtils.clamp(player.position.y, skyFloorHeight + avatarFloorClearance, 18);
   } else if (state.sceneId === 'luminous') {
@@ -3742,6 +5459,25 @@ function resolveCinemaChairCollisions() {
 }
 
 function resolveOpenSeaInstallationCollisions() {
+  if (state.sceneId !== 'realistic-beach' || !openSeaOrbitGroup) return;
+  // Solve against the original stationary geometry in the orbit's frame.
+  // Subtract the wall's angular velocity so it can gently push a still avatar.
+  const position = player.position.clone();
+  position.z -= openSeaInstallationCenterZ;
+  const wallVelocity = new THREE.Vector3(position.z, 0, -position.x).multiplyScalar(openSeaOrbitActualSpeed);
+  const velocity = playerVelocity.clone().sub(wallVelocity).applyAxisAngle(openSeaOrbitAxis, -openSeaOrbitAngle);
+  position.applyAxisAngle(openSeaOrbitAxis, -openSeaOrbitAngle);
+  position.z += openSeaInstallationCenterZ;
+  resolveOpenSeaLocalInstallationCollisions({ position }, velocity);
+  position.z -= openSeaInstallationCenterZ;
+  position.applyAxisAngle(openSeaOrbitAxis, openSeaOrbitAngle);
+  wallVelocity.set(position.z, 0, -position.x).multiplyScalar(openSeaOrbitActualSpeed);
+  position.z += openSeaInstallationCenterZ;
+  player.position.copy(position);
+  playerVelocity.copy(velocity.applyAxisAngle(openSeaOrbitAxis, openSeaOrbitAngle).add(wallVelocity));
+}
+
+function resolveOpenSeaLocalInstallationCollisions(player, playerVelocity) {
   if (state.sceneId !== 'realistic-beach') return;
 
   const horizontalRadius = getAvatarCollisionRadius();
@@ -3808,7 +5544,7 @@ function resolveOpenSeaInstallationCollisions() {
 
 function getButterflyFloorFold() {
   let floorHeight = null;
-  if (state.sceneId === 'realistic-beach') floorHeight = beachFloorHeight;
+  if (state.sceneId === 'realistic-beach') floorHeight = getOpenSeaFloorHeightAt(player.position.x, player.position.z);
   if (state.sceneId === 'sky') floorHeight = skyFloorHeight;
   if (['cinema', 'youtube-cinema'].includes(state.sceneId)) floorHeight = getCinemaFloorHeightAt(player.position.x, player.position.z);
   if (floorHeight === null) return 0;
@@ -3949,7 +5685,7 @@ function updateLuminousBubblePhysics(delta) {
   });
 }
 
-function updateCamera(delta) {
+function updateCamera(delta, snap = false) {
   const forward = getViewDirection();
   const cameraLift = state.sceneId === 'realistic-beach' ? 5.5 : 2.2;
   const thirdPersonPosition = player.position.clone().addScaledVector(forward, -cameraDistance).add(new THREE.Vector3(0, cameraLift, 0));
@@ -3984,7 +5720,8 @@ function updateCamera(delta) {
   const targetHeight = 1;
   const targetDistance = state.sceneId === 'realistic-beach' ? 12 : 5.5;
   const target = player.position.clone().add(new THREE.Vector3(0, targetHeight, 0)).addScaledVector(forward, targetDistance);
-  camera.position.lerp(desiredPosition, 1 - Math.pow(0.0005, delta));
+  const cameraBlend = snap ? 1 : 1 - Math.pow(0.0005, delta);
+  camera.position.lerp(desiredPosition, cameraBlend);
   const cameraFloorHeight = getCameraFloorHeight(camera.position.x, camera.position.z);
   if (cameraFloorHeight !== null) camera.position.y = Math.max(camera.position.y, cameraFloorHeight + 0.58);
   if (firstPersonBlend > 0.999) {
@@ -3996,11 +5733,12 @@ function updateCamera(delta) {
   avatarRoot.visible = !avatarHiddenForFirstPerson;
   cameraLookMatrix.lookAt(camera.position, target, camera.up);
   cameraDesiredQuaternion.setFromRotationMatrix(cameraLookMatrix);
-  camera.quaternion.slerp(cameraDesiredQuaternion, 1 - Math.pow(0.0005, delta));
+  camera.quaternion.slerp(cameraDesiredQuaternion, cameraBlend);
+  if (snap) camera.updateMatrixWorld();
 }
 
 function getCameraFloorHeight(x, z) {
-  if (state.sceneId === 'realistic-beach') return beachFloorHeight;
+  if (state.sceneId === 'realistic-beach') return getOpenSeaFloorHeightAt(x, z);
   if (state.sceneId === 'sky') return skyFloorHeight;
   if (['cinema', 'youtube-cinema'].includes(state.sceneId)) return getCinemaFloorHeightAt(x, z);
   return null;
@@ -4009,6 +5747,17 @@ function getCameraFloorHeight(x, z) {
 function animate() {
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.05);
+  if (openSeaOrbitGroup) {
+    // Keep angles unwrapped: damping across a 2π -> 0 reset would reverse
+    // the orbit. A short response softens starts and irregular frame timing.
+    openSeaOrbitTargetAngle += openSeaOrbitSpeed * delta;
+    const previousAngle = openSeaOrbitAngle;
+    openSeaOrbitAngle = THREE.MathUtils.damp(openSeaOrbitAngle, openSeaOrbitTargetAngle, 8, delta);
+    openSeaOrbitActualSpeed = delta > 0 ? (openSeaOrbitAngle - previousAngle) / delta : 0;
+    openSeaOrbitGroup.rotation.y = openSeaOrbitAngle;
+    // The renderer updates the hierarchy before shadows and reflections;
+    // collision resolution uses the same angle directly, without a traversal.
+  }
   updateGamepadInput(delta);
   updatePlayer(delta);
   updateLuminousBubblePhysics(delta);
@@ -4016,9 +5765,13 @@ function animate() {
   updateFlashlight();
   updateParticlePalette(delta);
   updateCinemaProjectionLight(delta);
-  if (realisticBeachWater?.material?.uniforms?.time) {
-    realisticBeachWater.material.uniforms.time.value = clock.elapsedTime;
+  openSeaSkyTime.value = clock.elapsedTime;
+  openSeaCloudVolume?.update(renderer, camera);
+  const realisticWaterTime = realisticBeachWater?.material?.uniforms?.time;
+  if (realisticWaterTime) {
+    realisticWaterTime.value = clock.elapsedTime;
   }
+  updateRealisticSeaPrismTexture(clock.elapsedTime);
   avatarRoot.position.y = Math.sin(clock.elapsedTime * 1.5) * 0.08;
   const avatarPitchTarget = state.avatarId === 'butterfly' ? pitch : 0;
   avatarRoot.rotation.x = THREE.MathUtils.damp(avatarRoot.rotation.x, avatarPitchTarget, 6.5, delta);
@@ -4059,12 +5812,25 @@ function animate() {
   });
   updateButterflyDust(delta);
   stage.traverse((object) => {
-    if (object.userData.beachTime && object.material?.uniforms?.uTime) {
-      object.material.uniforms.uTime.value = clock.elapsedTime;
+    const lunarWindShader = object.material?.userData?.openSeaLunarWind?.shader;
+    if (object.material?.userData?.openSeaVideoSurface) {
+      // Show the lit structure while remote media is unavailable, rather than
+      // a black, unlit video frame that conceals every lighting adjustment.
+      object.visible = state.openSeaMode !== 'dawn' || videoElement.readyState >= 2;
+    }
+    if (lunarWindShader) {
+      lunarWindShader.uniforms.uOpenSeaLunarWindTime.value = clock.elapsedTime;
+    }
+    const timeUniform = object.material?.uniforms?.uTime;
+    if (object.userData.beachTime && timeUniform) {
+      timeUniform.value = clock.elapsedTime;
     }
     if (object.userData.beachFoam) {
       const { phase, baseOpacity } = object.userData.beachFoam;
-      object.material.uniforms.uOpacity.value = baseOpacity + Math.sin(clock.elapsedTime * 0.8 + phase) * 0.055;
+      const opacityUniform = object.material?.uniforms?.uOpacity;
+      if (opacityUniform) {
+        opacityUniform.value = baseOpacity + Math.sin(clock.elapsedTime * 0.8 + phase) * 0.055;
+      }
       object.position.z = Math.sin(clock.elapsedTime * 0.34 + phase) * 0.16;
     }
     if (object.userData.realisticTide) {
@@ -4084,11 +5850,40 @@ function animate() {
     if (object.userData.beachPlant) {
       object.rotation.z = Math.sin(clock.elapsedTime * 0.24 + object.userData.beachPlant.phase) * 0.018;
     }
+    if (object.userData.openSeaStars) {
+      const { baseOpacity, phase } = object.userData.openSeaStars;
+      object.material.opacity = baseOpacity * (0.78 + Math.sin(clock.elapsedTime * 0.72 + phase) * 0.22);
+    }
+    if (object.userData.openSeaIslandFoam) {
+      const { baseOpacity, phase } = object.userData.openSeaIslandFoam;
+      const pulse = Math.sin(clock.elapsedTime * 0.52 + phase);
+      object.material.opacity = baseOpacity * (0.72 + pulse * 0.28);
+      const scale = 1 + pulse * 0.018;
+      object.scale.set(scale, 1, scale);
+    }
+    if (object.userData.openSeaIslandPalmLeaf) {
+      const { baseRotationX, baseRotationZ, phase } = object.userData.openSeaIslandPalmLeaf;
+      const sway = Math.sin(clock.elapsedTime * 0.64 + phase) * 0.028;
+      object.rotation.x = baseRotationX + sway;
+      object.rotation.z = baseRotationZ + sway * 0.5;
+    }
+    if (object.userData.openSeaLunarFlowerLayer) {
+      const { phase, glow, baseGlowOpacity } = object.userData.openSeaLunarFlowerLayer;
+      const breeze = clock.elapsedTime * 0.62 + phase;
+      glow.material.opacity = baseGlowOpacity * (0.88 + Math.sin(breeze * 1.2) * 0.12);
+    }
+    if (object.userData.openSeaLunarIslandLight) {
+      const { baseIntensity, phase } = object.userData.openSeaLunarIslandLight;
+      object.intensity = baseIntensity * (0.94 + Math.sin(clock.elapsedTime * 0.7 + phase) * 0.06);
+    }
     if (object.userData.butterflyGroundGlow) {
       object.position.x = player.position.x;
       object.position.z = player.position.z;
       const heightFade = THREE.MathUtils.clamp(1 - Math.max(0, player.position.y) / 9, 0.12, 1);
-      object.material.uniforms.uOpacity.value = state.avatarId === 'butterfly' ? heightFade * 0.11 : 0;
+      const opacityUniform = object.material?.uniforms?.uOpacity;
+      if (opacityUniform) {
+        opacityUniform.value = state.avatarId === 'butterfly' ? heightFade * 0.11 : 0;
+      }
     }
     if (object.userData.floatingParticles) {
       const { basePositions, phases, speeds, amplitudes } = object.userData.floatingParticles;
@@ -4099,8 +5894,8 @@ function animate() {
       }
       positionAttribute.needsUpdate = true;
     }
-    if (object.userData.luminousTime && object.material?.uniforms?.uTime) {
-      object.material.uniforms.uTime.value = clock.elapsedTime;
+    if (object.userData.luminousTime && timeUniform) {
+      timeUniform.value = clock.elapsedTime;
     }
     if (object.userData.luminousFloat) {
       const { basePosition, baseRotation, phase, speed, amplitude, spin } = object.userData.luminousFloat;
