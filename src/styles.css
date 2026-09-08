@@ -16,6 +16,14 @@ button { color: inherit; }
 
 #world { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
 #world:active { cursor: grabbing; }
+.mobile-controls { position: fixed; z-index: 6; inset: 0; display: none; pointer-events: none; user-select: none; touch-action: none; }
+.mobile-stick { position: absolute; bottom: max(1rem, env(safe-area-inset-bottom)); display: grid; width: 6.8rem; height: 6.8rem; place-items: center; pointer-events: auto; touch-action: none; }
+.mobile-stick--look { right: max(1rem, env(safe-area-inset-right)); }
+.mobile-stick--move { left: max(1rem, env(safe-area-inset-left)); }
+.mobile-stick__base { position: relative; display: block; width: 100%; height: 100%; border: 1px solid rgba(255,255,255,.42); border-radius: 50%; background: rgba(255,255,255,.1); box-shadow: inset 0 0 1.2rem rgba(255,255,255,.08), 0 0 1.8rem rgba(255,255,255,.1); backdrop-filter: blur(8px); }
+.mobile-stick__base::before { position: absolute; inset: 17%; border: 1px solid rgba(255,255,255,.16); border-radius: 50%; content: ''; }
+.mobile-stick__knob { position: absolute; top: 50%; left: 50%; display: block; width: 2.35rem; height: 2.35rem; border: 1px solid rgba(255,255,255,.84); border-radius: 50%; background: rgba(255,255,255,.72); box-shadow: 0 0 .9rem rgba(255,255,255,.44), inset -.22rem -.28rem .42rem rgba(103,119,170,.2); transform: translate3d(0, 0, 0) translate(-50%, -50%); }
+.mobile-stick__label { position: absolute; bottom: -.1rem; color: rgba(255,255,255,.55); font: .52rem 'DM Mono', monospace; letter-spacing: .12em; text-transform: uppercase; text-shadow: 0 1px 8px rgba(0,0,0,.7); }
 .youtube-layer { position: fixed; z-index: 2; inset: 0; overflow: hidden; pointer-events: none; visibility: hidden; }
 .youtube-layer.is-active { visibility: visible; }
 .youtube-screen { width: 960px; height: 540px; overflow: hidden; background: #000; pointer-events: auto; }
@@ -32,6 +40,7 @@ button { color: inherit; }
 .welcome h1 { margin: .6rem 0 .8rem; font-size: clamp(3rem, 7vw, 6.6rem); font-weight: 500; letter-spacing: -.08em; line-height: .95; }
 .welcome__copy { margin: 0 0 2rem; color: rgba(242, 238, 255, .7); font-size: 1rem; }
 .welcome__hint { margin: 2.4rem 0 0; color: rgba(222, 215, 255, .42); font: .64rem 'DM Mono', monospace; letter-spacing: .04em; }
+.welcome__orientation-hint { display: none; margin: 1.1rem 0 0; color: rgba(242, 238, 255, .62); font: .62rem/1.5 'DM Mono', monospace; letter-spacing: .04em; }
 
 .button { border: 0; border-radius: 100px; cursor: pointer; padding: .92rem 1.45rem; transition: transform .2s ease, background .2s ease; }
 .button:hover { transform: translateY(-2px); }
@@ -142,3 +151,21 @@ button { color: inherit; }
 @keyframes pulse { 50% { opacity: .2; transform: scale(.65); } }
 
 @media (max-width: 1100px) { body { min-width: 0; } .topbar { padding: 1rem; } }
+
+@media (max-width: 720px), (hover: none) and (pointer: coarse) {
+  body { min-width: 0; }
+  #world { cursor: default; touch-action: none; }
+  .mobile-controls.is-active { display: block; }
+  .topbar { padding: max(.8rem, env(safe-area-inset-top)) max(.8rem, env(safe-area-inset-right)); }
+  .topbar__actions .icon-button { opacity: 1; pointer-events: auto; transform: translate(0, 0); }
+  .menu { top: .6rem; right: .6rem; bottom: .6rem; width: min(390px, calc(100vw - 1.2rem)); padding: 1rem; }
+  .mini-player { top: max(.8rem, env(safe-area-inset-top)); right: auto; bottom: auto; left: max(.8rem, env(safe-area-inset-left)); }
+  .mobile-stick { width: clamp(5.6rem, 25vw, 6.8rem); height: clamp(5.6rem, 25vw, 6.8rem); }
+  .welcome { padding: 1.25rem; }
+  .welcome h1 { font-size: clamp(2.8rem, 15vw, 5rem); }
+  .welcome__hint { max-width: 18rem; margin-top: 1.8rem; line-height: 1.6; }
+}
+
+@media (max-width: 720px) and (orientation: portrait), (hover: none) and (pointer: coarse) and (orientation: portrait) {
+  .welcome__orientation-hint { display: block; }
+}

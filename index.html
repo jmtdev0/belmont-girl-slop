@@ -14,12 +14,24 @@
     <div id="app">
       <canvas id="world" aria-label="belmont girl 3D space"></canvas>
 
+      <div id="mobile-controls" class="mobile-controls" aria-label="Mobile controls">
+        <div id="mobile-look-stick" class="mobile-stick mobile-stick--look" data-joystick="look" role="group" aria-label="Move camera">
+          <span class="mobile-stick__base" aria-hidden="true"><span class="mobile-stick__knob"></span></span>
+          <span class="mobile-stick__label" aria-hidden="true">Camera</span>
+        </div>
+        <div id="mobile-move-stick" class="mobile-stick mobile-stick--move" data-joystick="move" role="group" aria-label="Move butterfly">
+          <span class="mobile-stick__base" aria-hidden="true"><span class="mobile-stick__knob"></span></span>
+          <span class="mobile-stick__label" aria-hidden="true">Move</span>
+        </div>
+      </div>
+
       <section id="welcome" class="welcome" aria-labelledby="welcome-title">
         <div class="welcome__halo"></div>
         <p class="eyebrow">belmont girl</p>
         <h1 id="welcome-title">all</h1>
         <button id="enter-button" class="button button--primary">Enter the universe</button>
         <p class="welcome__hint">Desktop · WASD to fly · Space/Alt to move up and down · drag to look · wheel to zoom</p>
+        <p class="welcome__orientation-hint" role="note">Best experienced with your phone in landscape</p>
       </section>
 
       <header class="topbar">

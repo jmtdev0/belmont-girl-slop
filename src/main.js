@@ -144,6 +144,9 @@ const state = {
 
 const dom = {
   canvas: document.querySelector('#world'),
+  mobileControls: document.querySelector('#mobile-controls'),
+  mobileLookStick: document.querySelector('#mobile-look-stick'),
+  mobileMoveStick: document.querySelector('#mobile-move-stick'),
   welcome: document.querySelector('#welcome'),
   enterButton: document.querySelector('#enter-button'),
   menu: document.querySelector('#menu'),
@@ -399,6 +402,12 @@ const luminousPhysicsDummy = new THREE.Object3D();
 const keys = new Set();
 const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'e', 'alt', 'shift', 'q']);
 const gamepadInput = { moveX: 0, moveY: 0, lookX: 0, lookY: 0, ascend: 0, descend: 0 };
+const mobileInput = { moveX: 0, moveY: 0, lookX: 0, lookY: 0 };
+const mobileJoysticks = {
+  look: { element: null, knob: null, pointerId: null, originX: 0, originY: 0, x: 0, y: 0 },
+  move: { element: null, knob: null, pointerId: null, originX: 0, originY: 0, x: 0, y: 0 },
+};
+const mobileLookSpeed = 2.7;
 let activeGamepadIndex = null;
 let lastWPressTime = -Infinity;
 let forwardBoostActive = false;
@@ -425,6 +434,7 @@ setVideo(state.videoId);
 if (previewParameters?.has('preview')) {
   state.started = true;
   dom.welcome.classList.add('is-hidden');
+  syncMobileControls();
   videoElement.muted = true;
   videoElement.play().catch(() => {});
   if (previewParameters.has('clean')) {
@@ -436,6 +446,7 @@ if (previewParameters?.has('preview')) {
 animate();
 
 function buildInterface() {
+  bindMobileJoysticks();
   scenes.forEach((item, index) => {
     const button = document.createElement('button');
     button.className = 'choice-card';
@@ -540,6 +551,7 @@ function buildInterface() {
   dom.enterButton.addEventListener('click', async () => {
     state.started = true;
     dom.welcome.classList.add('is-hidden');
+    syncMobileControls();
     await playVideoWithAudio();
   });
   dom.menuButton.addEventListener('click', () => toggleMenu(true));
@@ -633,6 +645,7 @@ function buildInterface() {
 function clearMovementState() {
   keys.clear();
   dragging = false;
+  resetMobileJoysticks();
   playerVelocity.set(0, 0, 0);
   lastWPressTime = -Infinity;
   forwardBoostActive = false;
@@ -669,6 +682,108 @@ function resetGamepadInput() {
   gamepadInput.lookY = 0;
   gamepadInput.ascend = 0;
   gamepadInput.descend = 0;
+}
+
+function syncMobileControls() {
+  dom.mobileControls.classList.toggle('is-active', state.started && !dom.menu.classList.contains('is-open'));
+}
+
+function bindMobileJoysticks() {
+  bindMobileJoystick('look', dom.mobileLookStick);
+  bindMobileJoystick('move', dom.mobileMoveStick);
+}
+
+function bindMobileJoystick(type, element) {
+  const joystick = mobileJoysticks[type];
+  joystick.element = element;
+  joystick.knob = element.querySelector('.mobile-stick__knob');
+
+  element.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (joystick.pointerId !== null) return;
+    const bounds = element.getBoundingClientRect();
+    joystick.pointerId = event.pointerId;
+    joystick.originX = bounds.left + bounds.width / 2;
+    joystick.originY = bounds.top + bounds.height / 2;
+    element.setPointerCapture(event.pointerId);
+    updateMobileJoystick(type, event.clientX, event.clientY);
+  });
+  element.addEventListener('pointermove', (event) => {
+    if (event.pointerId !== joystick.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    updateMobileJoystick(type, event.clientX, event.clientY);
+  });
+  const release = (event) => {
+    if (event.pointerId !== undefined && event.pointerId !== joystick.pointerId) return;
+    resetMobileJoystick(type);
+  };
+  element.addEventListener('pointerup', release);
+  element.addEventListener('pointercancel', release);
+  element.addEventListener('lostpointercapture', release);
+}
+
+function updateMobileJoystick(type, clientX, clientY) {
+  const joystick = mobileJoysticks[type];
+  const bounds = joystick.element.getBoundingClientRect();
+  const maxDistance = Math.max(1, bounds.width * 0.28);
+  let offsetX = clientX - joystick.originX;
+  let offsetY = clientY - joystick.originY;
+  const distance = Math.hypot(offsetX, offsetY);
+  if (distance > maxDistance) {
+    const scale = maxDistance / distance;
+    offsetX *= scale;
+    offsetY *= scale;
+  }
+  const deadzone = 0.12;
+  const remap = (value) => {
+    const magnitude = Math.abs(value);
+    if (magnitude <= deadzone) return 0;
+    return Math.sign(value) * ((magnitude - deadzone) / (1 - deadzone));
+  };
+  joystick.x = remap(offsetX / maxDistance);
+  joystick.y = remap(offsetY / maxDistance);
+  joystick.knob.style.transform = `translate3d(${offsetX}px, ${offsetY}px, 0) translate(-50%, -50%)`;
+  if (type === 'look') {
+    mobileInput.lookX = joystick.x;
+    mobileInput.lookY = joystick.y;
+  } else {
+    mobileInput.moveX = joystick.x;
+    mobileInput.moveY = joystick.y;
+  }
+}
+
+function resetMobileJoystick(type) {
+  const joystick = mobileJoysticks[type];
+  if (!joystick) return;
+  if (joystick.pointerId !== null && joystick.element.hasPointerCapture?.(joystick.pointerId)) {
+    joystick.element.releasePointerCapture(joystick.pointerId);
+  }
+  joystick.pointerId = null;
+  joystick.x = 0;
+  joystick.y = 0;
+  joystick.knob.style.transform = 'translate3d(0, 0, 0) translate(-50%, -50%)';
+  if (type === 'look') {
+    mobileInput.lookX = 0;
+    mobileInput.lookY = 0;
+  } else {
+    mobileInput.moveX = 0;
+    mobileInput.moveY = 0;
+  }
+}
+
+function resetMobileJoysticks() {
+  resetMobileJoystick('look');
+  resetMobileJoystick('move');
+}
+
+function updateMobileLook(delta) {
+  if (document.hidden || !state.started) return;
+  yaw += mobileInput.lookX * mobileLookSpeed * delta;
+  const maximumPitch = avatarHiddenForFirstPerson ? Math.PI / 2 - 0.01 : 1.1;
+  const minimumPitch = avatarHiddenForFirstPerson ? -Math.PI / 2 + 0.01 : -1.1;
+  pitch = THREE.MathUtils.clamp(pitch - mobileInput.lookY * mobileLookSpeed * delta, minimumPitch, maximumPitch);
 }
 
 function applyGamepadDeadzone(value, deadzone = 0.14) {
@@ -5287,9 +5402,11 @@ async function playVideoWithAudio() {
 }
 
 function toggleMenu(isOpen) {
+  if (isOpen) clearMovementState();
   dom.menu.classList.toggle('is-open', isOpen);
   dom.menu.setAttribute('aria-hidden', String(!isOpen));
   dom.menuButton.setAttribute('aria-expanded', String(isOpen));
+  syncMobileControls();
   revealCornerControls(isOpen || menuPointerNear);
 }
 
@@ -5336,6 +5453,9 @@ function updatePlayer(delta) {
   if (keys.has('alt') || keys.has('shift') || keys.has('q')) direction.y -= 1;
   direction.addScaledVector(forward, -gamepadInput.moveY);
   direction.addScaledVector(right, gamepadInput.moveX);
+  const mobileForward = new THREE.Vector3(Math.sin(yaw), 0, -Math.cos(yaw));
+  direction.addScaledVector(mobileForward, -mobileInput.moveY);
+  direction.addScaledVector(right, mobileInput.moveX);
   direction.y += gamepadInput.ascend - gamepadInput.descend;
   if (forwardBoostActive && keys.has('w') && forwardBoostFlutterRemaining > 0) {
     forwardBoostFlutterRemaining = Math.max(0, forwardBoostFlutterRemaining - delta);
@@ -5759,6 +5879,7 @@ function animate() {
     // collision resolution uses the same angle directly, without a traversal.
   }
   updateGamepadInput(delta);
+  updateMobileLook(delta);
   updatePlayer(delta);
   updateLuminousBubblePhysics(delta);
   updateCamera(delta);
@@ -5784,7 +5905,8 @@ function animate() {
     }
   }
   if (Math.abs(gamepadInput.moveX) > 0.08 || Math.abs(gamepadInput.moveY) > 0.08
-    || gamepadInput.ascend > 0.08 || gamepadInput.descend > 0.08) flightMovement = true;
+    || gamepadInput.ascend > 0.08 || gamepadInput.descend > 0.08
+    || Math.abs(mobileInput.moveX) > 0.08 || Math.abs(mobileInput.moveY) > 0.08) flightMovement = true;
   const flutterTarget = flightMovement && state.avatarId === 'butterfly' ? 1 : 0;
   butterflyFlutterBlend = THREE.MathUtils.damp(butterflyFlutterBlend, flutterTarget, 5, delta);
   const forwardBoostFlutterTarget = forwardBoostActive
