@@ -65,6 +65,7 @@ export function makeDawnSky(sunDirection, timeUniform = { value: 0 }, options = 
         vec3 color = dawnBackground(d);
 
         float clouds = 0.0;
+        vec3 cloudColor = vec3(0.0);
         if (!volumetricClouds) {
         // Retain the lightweight sky for comparison with ?clouds=flat.
         vec2 cloudUv = d.xz / max(d.y + 0.13, 0.035);
@@ -73,12 +74,12 @@ export function makeDawnSky(sunDirection, timeUniform = { value: 0 }, options = 
         cloudUv += vec2(0.0018, 0.00065) * uTime;
         float broad = fbm(cloudUv * vec2(2.0, 3.5) + vec2(8.0, 3.0));
         float detail = fbm(cloudUv * vec2(8.0, 12.0) + vec2(-0.002, 0.001) * uTime);
-        clouds = smoothstep(0.49, 0.7, broad * 0.76 + detail * 0.24);
+        float coverageShift = 0.12 * smoothstep(0.94, 0.995, dot(d, sunDirection));
+        clouds = smoothstep(0.49 + coverageShift, 0.7 + coverageShift, broad * 0.76 + detail * 0.24);
         clouds *= smoothstep(0.005, 0.055, d.y) * (1.0 - smoothstep(0.45, 0.8, d.y));
         vec3 cloudShadow = vec3(0.27, 0.29, 0.37);
         vec3 cloudLight = mix(vec3(0.65, 0.62, 0.62), vec3(1.65, 0.65, 0.17), towardSun);
-        vec3 cloudColor = mix(cloudLight, cloudShadow, smoothstep(0.12, 0.85, clouds) * 0.48);
-        color = mix(color, cloudColor, clouds * 0.8);
+        cloudColor = mix(cloudLight, cloudShadow, smoothstep(0.12, 0.85, clouds) * 0.48);
         }
 
         // 0.65-degree angular diameter, gently antialiased at the limb.
@@ -91,15 +92,16 @@ export function makeDawnSky(sunDirection, timeUniform = { value: 0 }, options = 
         float halo = 0.20 * exp(-pow(angle / 0.055, 2.0));
         vec3 solarLight = solarColor * (4.0 * disc + corona);
         solarLight += vec3(1.0, 0.62, 0.25) * halo;
-        color += solarLight * (1.0 - clouds * 0.65);
+        // Composite the complete sky, solar disc and halo behind the clouds.
+        color += solarLight;
         if (volumetricClouds) {
           vec2 screenUv = (gl_FragCoord.xy - cloudViewport.xy) / cloudViewport.zw;
           vec4 volume = useCloudView ? texture2D(cloudView, screenUv) : textureCube(cloudVolume, d);
-          // Art-directed clearing around the dawn sun, shared by the visible
-          // sky and reflections. Fade premultiplied radiance and opacity alike
-          // so the opening does not leave a bright cloud fringe.
-          volume *= smoothstep(0.018, 0.10, angle);
+          // Premultiplied cloud radiance and opacity preserve dense silhouettes
+          // while naturally transmitting sunlight through thinner clouds.
           color = color * (1.0 - volume.a) + volume.rgb;
+        } else {
+          color = mix(color, cloudColor, clouds);
         }
         gl_FragColor = vec4(color, 1.0);
         #include <tonemapping_fragment>

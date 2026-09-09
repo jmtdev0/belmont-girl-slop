@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import { makeLunarGarden, gardenHeight, resolveLunarGardenCollisions } from './LunarGarden.js';
+import { softenWaterShadows } from './SoftWaterShadows.js';
+import { enableComposerAntialiasing } from './ComposerAntialiasing.js';
+import { patchArcVideoSlide, waitForVideoReady } from './ArcVideoSlide.js';
+import { clampArcCamera } from './ArcCameraCollision.js';
 import { naturalizeWater } from './NaturalWater.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -21,7 +26,7 @@ let openSeaCloudVolume = null;
 
 const scenes = [
   { id: 'sphere', label: 'Enveloping sphere', description: 'Inside a sphere of memory', icon: '◌' },
-  { id: 'sky', label: 'Sky', description: 'A suspended projection', icon: '☁' },
+  { id: 'sky', label: 'Sky', description: 'A suspended projection', icon: '☁', menuHidden: true },
   { id: 'realistic-beach', label: 'Open sea', description: 'An endless surface of moving water', icon: '◒' },
   { id: 'luminous', label: 'Luminous space', description: 'Orbs holding the image', icon: '✦' },
   { id: 'cube', label: 'Enveloping cube', description: 'A six-sided room', icon: '□' },
@@ -154,8 +159,6 @@ const dom = {
   fullscreenButton: document.querySelector('#fullscreen-button'),
   closeMenu: document.querySelector('#close-menu'),
   sceneOptions: document.querySelector('#scene-options'),
-  openSeaModes: document.querySelector('#open-sea-modes'),
-  openSeaModeOptions: document.querySelector('#open-sea-mode-options'),
   butterflyPalette: document.querySelector('#butterfly-palette'),
   butterflyColorPicker: document.querySelector('#butterfly-color-picker'),
   butterflyColorValue: document.querySelector('#butterfly-color-value'),
@@ -203,6 +206,7 @@ world.fog = new THREE.FogExp2('#090c1b', 0.012);
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 12000);
 camera.position.set(0, 3.5, 8);
 const composer = new EffectComposer(renderer);
+enableComposerAntialiasing(renderer, composer);
 composer.addPass(new RenderPass(world, camera));
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.18, 0.24, 0.94);
 composer.addPass(bloomPass);
@@ -223,7 +227,7 @@ let flashlightTarget = null;
 let flashlightEnabled = false;
 const textureFallback = makeFallbackTexture();
 const luminousGlowTexture = makeLuminousGlowTexture();
-const videoElement = document.createElement('video');
+let videoElement = document.createElement('video');
 videoElement.crossOrigin = 'anonymous';
 videoElement.loop = false;
 videoElement.playsInline = true;
@@ -244,18 +248,23 @@ const cinemaProjectionSample = {
   zones: Array.from({ length: 3 }, () => ({ color: new THREE.Color('#ffffff'), response: 0 })),
 };
 let lastCinemaLightSample = -Infinity;
-videoElement.addEventListener('loadeddata', () => {
+function bindVideoControls(element) {
+element.addEventListener('loadeddata', () => {
+  if (element !== videoElement) return;
   lastPaletteUpdate = 0;
   lastCinemaLightSample = -Infinity;
   syncMiniVideoControls();
 });
-videoElement.addEventListener('loadedmetadata', syncMiniVideoControls);
-videoElement.addEventListener('durationchange', syncMiniVideoControls);
-videoElement.addEventListener('timeupdate', syncMiniVideoControls);
-videoElement.addEventListener('emptied', resetMiniVideoControls);
-videoElement.addEventListener('ended', () => {
+for (const event of ['loadedmetadata', 'durationchange', 'timeupdate']) {
+  element.addEventListener(event, () => { if (element === videoElement) syncMiniVideoControls(); });
+}
+element.addEventListener('emptied', () => { if (element === videoElement) resetMiniVideoControls(); });
+element.addEventListener('ended', () => {
+  if (element !== videoElement || pendingArcVideo) return;
   if (state.sceneId !== 'youtube-cinema' && !videoElement.loop) playRandomVideo();
 });
+}
+bindVideoControls(videoElement);
 
 let videoTexture = new THREE.VideoTexture(videoElement);
 videoTexture.colorSpace = THREE.SRGBColorSpace;
@@ -263,6 +272,9 @@ videoTexture.minFilter = THREE.LinearFilter;
 videoTexture.magFilter = THREE.LinearFilter;
 videoTexture.generateMipmaps = false;
 let activeTexture = textureFallback;
+const arcSlideUniforms = {uArcPrevious: {value: textureFallback}, uArcSlide: {value: 1}};
+let pendingArcVideo = null;
+let activeArcSlide = null;
 let sceneObjects = [];
 let realisticBeachWater = null;
 let realisticSeaPrism = null;
@@ -316,8 +328,8 @@ const openSeaWaterCenterZ = -openSeaWaterSize / 2 + 1.25;
 // Anchor the island and paired arcs to the circular sea's centre. Preserve
 // the original opening distance and view direction when moving the avatar.
 const openSeaInstallationCenterZ = openSeaWaterCenterZ;
-const realisticBeachStartZ = openSeaInstallationCenterZ + 1200;
-const openSeaDawnStartZ = openSeaInstallationCenterZ + 1730;
+const realisticBeachStartZ = openSeaInstallationCenterZ + 900;
+const openSeaDawnStartZ = openSeaInstallationCenterZ + 900;
 // Keep the two installations closer together while scaling their radial
 // footprint with their height. This preserves the panoramic proportions of
 // the C-shaped video surfaces instead of making them simply taller.
@@ -328,19 +340,7 @@ const openSeaInstallationHeight = 600;
 const openSeaInstallationBaseY = beachFloorHeight - 0.16;
 const openSeaInstallationVideoFogStrength = 0.08;
 const openSeaInstallationBlockEnvironmentIntensity = 0.32;
-const openSeaLunarIslandRadiusX = 172;
-const openSeaLunarIslandRadiusZ = 132;
 const openSeaLunarIslandWaterY = beachFloorHeight - 0.08;
-const openSeaLunarIslandFlowerCount = 520;
-const openSeaLunarIslandProfile = [
-  { radius: 0, height: 7.4 },
-  { radius: 0.22, height: 7.05 },
-  { radius: 0.48, height: 5.75 },
-  { radius: 0.7, height: 3.45 },
-  { radius: 0.84, height: 1.35 },
-  { radius: 0.94, height: -0.12 },
-  { radius: 1, height: -1.35 },
-];
 // The reference demo places a compact, asset-based island in the scene center
 // and surrounds it with instanced rocks and vegetation. Keep the equivalent
 // landmark centered in the opening between our two installations.
@@ -422,7 +422,7 @@ const forwardBoostSpeedMultiplier = 2.15;
 const forwardBoostFlutterDuration = 0.82;
 const highSpeedSequence = ['6', '7', '6', '7'];
 const highSpeedSequenceWindow = 520;
-const highSpeedMultiplier = 7;
+const highSpeedMultiplier = 6.7;
 
 world.add(stage, player, butterflyDustWorld);
 player.add(avatarRoot);
@@ -447,7 +447,7 @@ animate();
 
 function buildInterface() {
   bindMobileJoysticks();
-  scenes.forEach((item, index) => {
+  scenes.filter((item) => !item.menuHidden).forEach((item) => {
     const button = document.createElement('button');
     button.className = 'choice-card';
     button.dataset.id = item.id;
@@ -456,17 +456,6 @@ function buildInterface() {
     dom.sceneOptions.append(button);
     if (item.id === state.sceneId) button.classList.add('is-selected');
   });
-
-  openSeaModes.forEach((item) => {
-    const button = document.createElement('button');
-    button.className = 'choice-card choice-card--suboption';
-    button.dataset.id = item.id;
-    button.type = 'button';
-    button.innerHTML = `<span class="choice-card__icon">${item.icon}</span><span><strong>${item.label}</strong><small>${item.description}</small></span>`;
-    button.addEventListener('click', () => setOpenSeaMode(item.id));
-    dom.openSeaModeOptions.append(button);
-  });
-  updateOpenSeaModeUI();
 
   butterflyPalettes.forEach((item) => {
     const button = document.createElement('button');
@@ -902,25 +891,6 @@ function updateFlashlight() {
   flashlightTarget.position.copy(camera.position).addScaledVector(flashlightDirection, 40);
 }
 
-function updateOpenSeaModeUI() {
-  const isOpenSea = state.sceneId === 'realistic-beach';
-  dom.openSeaModes.hidden = !isOpenSea;
-  dom.openSeaModes.setAttribute('aria-hidden', String(!isOpenSea));
-  dom.openSeaModeOptions.querySelectorAll('[data-id]').forEach((button) => {
-    button.classList.toggle('is-selected', button.dataset.id === state.openSeaMode);
-  });
-}
-
-function setOpenSeaMode(modeId) {
-  if (!openSeaModes.some((mode) => mode.id === modeId)) return;
-  state.openSeaMode = modeId;
-  if (state.sceneId === 'realistic-beach') {
-    setScene('realistic-beach', { force: true });
-  } else {
-    updateOpenSeaModeUI();
-  }
-}
-
 function getOpenSeaAtmosphere() {
   return openSeaAtmospheres[state.openSeaMode] ?? openSeaAtmospheres.dawn;
 }
@@ -928,6 +898,8 @@ function getOpenSeaAtmosphere() {
 function setScene(sceneId, { force = false } = {}) {
   const scene = scenes.find((item) => item.id === sceneId);
   if (!scene || (!force && state.sceneId === sceneId && sceneObjects.length > 0)) return;
+  cancelArcVideoLoad();
+  finishArcVideoSlide();
 
   const transitionToken = ++sceneTransitionToken;
   window.clearTimeout(sceneTransitionTimer);
@@ -1037,8 +1009,8 @@ function applyScene(sceneId) {
   }
   updateButterflyWingDepthMode();
   document.querySelectorAll('#scene-options [data-id]').forEach((button) => button.classList.toggle('is-selected', button.dataset.id === sceneId));
-  updateOpenSeaModeUI();
   if (sceneId === 'realistic-beach') updateCamera(0, true);
+  warmFirstPersonView();
 }
 
 function clearScene() {
@@ -1407,524 +1379,19 @@ function addOpenSeaLunarTearIsland() {
 }
 
 function makeOpenSeaLunarTearIsland() {
-  const random = createOpenSeaLunarIslandRandom();
-  const island = new THREE.Group();
-  island.name = 'Lunar Tear island';
-  island.add(makeOpenSeaLunarIslandTerrain(random));
-  island.add(makeOpenSeaLunarIslandRocks(random));
-  island.add(makeOpenSeaLunarIslandGroundCover(random));
-  island.add(makeOpenSeaLunarTearField(random));
-
-  const atmosphereStrength = state.openSeaMode === 'night' ? 42 : state.openSeaMode === 'dawn' ? 24 : 11;
-  const flowerLight = new THREE.PointLight('#fff2cf', atmosphereStrength, 250, 2);
-  flowerLight.position.set(0, 18, 0);
-  flowerLight.userData.openSeaLunarIslandLight = {
-    baseIntensity: atmosphereStrength,
-    phase: random() * Math.PI * 2,
-  };
-  island.add(flowerLight);
-  island.userData.openSeaLunarIsland = true;
-  return island;
-}
-
-function makeOpenSeaLunarIslandTerrain() {
-  const segments = 128;
-  const rings = [...openSeaLunarIslandProfile].reverse().filter((ring) => ring.radius > 0);
-  const positions = [];
-  const colors = [];
-  const indices = [];
-  const topColor = new THREE.Color('#3b4435');
-  const middleColor = new THREE.Color('#333a32');
-  const wetColor = new THREE.Color('#293937');
-
-  rings.forEach((ring) => {
-    for (let segment = 0; segment < segments; segment += 1) {
-      const angle = segment / segments * Math.PI * 2;
-      const edgeNoise = Math.sin(angle * 3 + 0.7) * 0.032
-        + Math.sin(angle * 7 - 1.1) * 0.018
-        + Math.sin(angle * 13 + 2.4) * 0.008;
-      const radiusScale = 1 + edgeNoise * THREE.MathUtils.lerp(0.32, 1, ring.radius);
-      const x = Math.cos(angle) * openSeaLunarIslandRadiusX * ring.radius * radiusScale;
-      const z = Math.sin(angle) * openSeaLunarIslandRadiusZ * ring.radius * radiusScale;
-      const surfaceNoise = openSeaLunarIslandSurfaceNoise(angle, ring.radius);
-      positions.push(x, ring.height + surfaceNoise, z);
-
-      const edgeBlend = THREE.MathUtils.smoothstep(ring.radius, 0.55, 1);
-      const middleBlend = THREE.MathUtils.smoothstep(ring.radius, 0.18, 0.72);
-      const color = topColor.clone().lerp(middleColor, middleBlend).lerp(wetColor, edgeBlend);
-      const colorNoise = Math.sin(x * 0.047 + z * 0.019) * 0.54
-        + Math.sin(z * 0.061 - x * 0.013) * 0.31;
-      color.offsetHSL(colorNoise * 0.006, colorNoise * 0.008, colorNoise * 0.018);
-      colors.push(color.r, color.g, color.b);
-    }
-  });
-
-  for (let ringIndex = 0; ringIndex < rings.length - 1; ringIndex += 1) {
-    for (let segment = 0; segment < segments; segment += 1) {
-      const nextSegment = (segment + 1) % segments;
-      const current = ringIndex * segments + segment;
-      const currentNext = ringIndex * segments + nextSegment;
-      const inner = (ringIndex + 1) * segments + segment;
-      const innerNext = (ringIndex + 1) * segments + nextSegment;
-      indices.push(current, inner, currentNext, currentNext, inner, innerNext);
-    }
-  }
-
-  const centerIndex = positions.length / 3;
-  positions.push(0, sampleOpenSeaLunarIslandProfile(0), 0);
-  colors.push(topColor.r, topColor.g, topColor.b);
-  const innerRingStart = (rings.length - 1) * segments;
-  for (let segment = 0; segment < segments; segment += 1) {
-    indices.push(innerRingStart + segment, centerIndex, innerRingStart + ((segment + 1) % segments));
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingSphere();
-
-  const terrain = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    emissive: '#101a15',
-    emissiveIntensity: 0.26,
-    roughness: 0.96,
-    metalness: 0.015,
-    envMapIntensity: 0.34,
-    side: THREE.DoubleSide,
-  }));
-  terrain.castShadow = true;
-  terrain.receiveShadow = true;
-  return terrain;
-}
-
-function makeOpenSeaLunarIslandRocks(random) {
-  const rockCount = 72;
-  const geometry = new THREE.DodecahedronGeometry(1, 0);
-  const material = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    color: '#ffffff',
-    emissive: '#111817',
-    emissiveIntensity: 0.18,
-    roughness: 0.87,
-    metalness: 0.04,
-    envMapIntensity: 0.42,
-    flatShading: true,
-  });
-  const rocks = new THREE.InstancedMesh(geometry, material, rockCount);
-  const palette = [
-    new THREE.Color('#43514b'),
-    new THREE.Color('#56594f'),
-    new THREE.Color('#655f54'),
-    new THREE.Color('#354945'),
-  ];
-  const instance = new THREE.Object3D();
-
-  for (let index = 0; index < rockCount; index += 1) {
-    const angle = random() * Math.PI * 2;
-    const radius = index < 52
-      ? THREE.MathUtils.lerp(0.83, 0.985, random())
-      : THREE.MathUtils.lerp(0.3, 0.79, random());
-    const x = Math.cos(angle) * openSeaLunarIslandRadiusX * radius;
-    const z = Math.sin(angle) * openSeaLunarIslandRadiusZ * radius;
-    const scale = index < 52
-      ? THREE.MathUtils.lerp(1.5, 4.5, random())
-      : THREE.MathUtils.lerp(0.8, 2.4, random());
-    const verticalScale = scale * THREE.MathUtils.lerp(0.42, 0.74, random());
-    instance.position.set(
-      x,
-      getOpenSeaLunarIslandSurfaceOffset(x, z) + verticalScale * 0.46,
-      z,
-    );
-    instance.rotation.set(
-      THREE.MathUtils.lerp(-0.22, 0.22, random()),
-      random() * Math.PI * 2,
-      THREE.MathUtils.lerp(-0.22, 0.22, random()),
-    );
-    instance.scale.set(scale * THREE.MathUtils.lerp(0.82, 1.35, random()), verticalScale, scale);
-    instance.updateMatrix();
-    rocks.setMatrixAt(index, instance.matrix);
-    rocks.setColorAt(index, palette[Math.floor(random() * palette.length)]);
-  }
-  rocks.instanceMatrix.needsUpdate = true;
-  rocks.instanceColor.needsUpdate = true;
-  rocks.castShadow = true;
-  rocks.receiveShadow = true;
-  rocks.frustumCulled = false;
-  return rocks;
-}
-
-function makeOpenSeaLunarIslandGroundCover(random) {
-  const leafCount = 1400;
-  const geometry = makeOpenSeaLunarPetalGeometry();
-  const material = new THREE.MeshStandardMaterial({
-    color: '#ffffff',
-    vertexColors: true,
-    emissive: '#0b1711',
-    emissiveIntensity: 0.36,
-    roughness: 0.96,
-    metalness: 0,
-    side: THREE.DoubleSide,
-  });
-  const leaves = new THREE.InstancedMesh(geometry, material, leafCount);
-  const palette = [
-    new THREE.Color('#233b2d'),
-    new THREE.Color('#2c4635'),
-    new THREE.Color('#1d3328'),
-    new THREE.Color('#354b38'),
-  ];
-  const instance = new THREE.Object3D();
-  for (let index = 0; index < leafCount; index += 1) {
-    const radius = Math.sqrt(random()) * 0.86;
-    const angle = random() * Math.PI * 2;
-    const x = Math.cos(angle) * openSeaLunarIslandRadiusX * radius;
-    const z = Math.sin(angle) * openSeaLunarIslandRadiusZ * radius;
-    const scale = THREE.MathUtils.lerp(0.72, 1.38, random());
-    instance.position.set(x, getOpenSeaLunarIslandSurfaceOffset(x, z) + 0.08, z);
-    instance.rotation.set(
-      THREE.MathUtils.lerp(-0.06, 0.06, random()),
-      random() * Math.PI * 2,
-      THREE.MathUtils.lerp(-0.14, 0.14, random()),
-    );
-    instance.scale.set(scale * THREE.MathUtils.lerp(0.82, 1.28, random()), scale, scale);
-    instance.updateMatrix();
-    leaves.setMatrixAt(index, instance.matrix);
-    leaves.setColorAt(index, palette[Math.floor(random() * palette.length)]);
-  }
-  leaves.instanceMatrix.needsUpdate = true;
-  leaves.instanceColor.needsUpdate = true;
-  leaves.receiveShadow = true;
-  leaves.frustumCulled = false;
-  leaves.renderOrder = 3;
-  return leaves;
-}
-
-function makeOpenSeaLunarTearField(random) {
-  const field = new THREE.Group();
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-  const flowers = [];
-  for (let index = 0; index < openSeaLunarIslandFlowerCount; index += 1) {
-    const normalizedRadius = Math.min(
-      0.82,
-      Math.sqrt((index + random() * 0.85) / openSeaLunarIslandFlowerCount) * 0.82,
-    );
-    const angle = index * goldenAngle + THREE.MathUtils.lerp(-0.36, 0.36, random());
-    const x = Math.cos(angle) * openSeaLunarIslandRadiusX * normalizedRadius;
-    const z = Math.sin(angle) * openSeaLunarIslandRadiusZ * normalizedRadius;
-    flowers.push({
-      x,
-      z,
-      groundY: getOpenSeaLunarIslandSurfaceOffset(x, z),
-      stemHeight: THREE.MathUtils.lerp(3.6, 6.2, random()) * THREE.MathUtils.lerp(1.06, 0.9, normalizedRadius),
-      scale: THREE.MathUtils.lerp(1.4, 2.08, random()),
-      rotation: random() * Math.PI * 2,
-      colorIndex: Math.floor(random() * 3),
-    });
-  }
-
-  const petalGeometry = makeOpenSeaLunarPetalGeometry();
-  const stemGeometry = new THREE.CylinderGeometry(0.11, 0.15, 1, 5, 5);
-  const centerGeometry = new THREE.SphereGeometry(0.26, 8, 6);
-  const petalMaterial = new THREE.MeshStandardMaterial({
-    color: '#fffdf4',
-    emissive: '#fff4d8',
-    emissiveIntensity: state.openSeaMode === 'night' ? 3.4 : state.openSeaMode === 'dawn' ? 0.85 : 1.15,
-    roughness: 0.7,
-    metalness: 0,
-    vertexColors: true,
-    side: THREE.DoubleSide,
-  });
-  const centerMaterial = new THREE.MeshBasicMaterial({
-    color: '#fff3bd',
-    toneMapped: false,
-  });
-  const stemMaterial = new THREE.MeshStandardMaterial({
-    color: '#294637',
-    roughness: 0.94,
-    metalness: 0,
-  });
-  const leafMaterial = new THREE.MeshStandardMaterial({
-    color: '#172d24',
-    emissive: '#08140f',
-    emissiveIntensity: 0.28,
-    roughness: 0.96,
-    metalness: 0,
-    side: THREE.DoubleSide,
-  });
-  const petalPalette = [
-    new THREE.Color('#fffdf4'),
-    new THREE.Color('#f4fbf5'),
-    new THREE.Color('#fff7df'),
-  ];
-  applyOpenSeaLunarInstancedWind(petalMaterial, 'petal', 0.98);
-  applyOpenSeaLunarInstancedWind(centerMaterial, 'whole', 0.98);
-  applyOpenSeaLunarInstancedWind(stemMaterial, 'stem', 0.98);
-  applyOpenSeaLunarInstancedWind(leafMaterial, 'leaf', 0.98);
-  const baseGlowOpacity = state.openSeaMode === 'night' ? 0.25 : state.openSeaMode === 'dawn' ? 0.14 : 0.07;
-
-  for (let layerIndex = 0; layerIndex < 3; layerIndex += 1) {
-    const layerFlowers = flowers.filter((_, flowerIndex) => flowerIndex % 3 === layerIndex);
-    const petals = new THREE.InstancedMesh(petalGeometry, petalMaterial, layerFlowers.length * 5);
-    const centers = new THREE.InstancedMesh(centerGeometry, centerMaterial, layerFlowers.length);
-    const stems = new THREE.InstancedMesh(stemGeometry, stemMaterial, layerFlowers.length);
-    const leaves = new THREE.InstancedMesh(petalGeometry, leafMaterial, layerFlowers.length * 2);
-    const glowPositions = new Float32Array(layerFlowers.length * 3);
-    const instance = new THREE.Object3D();
-
-    layerFlowers.forEach((flower, flowerIndex) => {
-      const blossomY = flower.groundY + flower.stemHeight;
-      instance.position.set(flower.x, flower.groundY + flower.stemHeight * 0.5, flower.z);
-      instance.rotation.set(0, flower.rotation, 0);
-      instance.scale.set(flower.scale, flower.stemHeight, flower.scale);
-      instance.updateMatrix();
-      stems.setMatrixAt(flowerIndex, instance.matrix);
-
-      for (let leafIndex = 0; leafIndex < 2; leafIndex += 1) {
-        const leafAngle = flower.rotation + leafIndex * Math.PI + THREE.MathUtils.lerp(-0.45, 0.45, random());
-        const leafHeight = flower.groundY + flower.stemHeight * THREE.MathUtils.lerp(0.22, 0.48, random());
-        instance.position.set(flower.x, leafHeight, flower.z);
-        instance.rotation.set(0, leafAngle, leafIndex === 0 ? -0.1 : 0.1);
-        instance.scale.setScalar(flower.scale * THREE.MathUtils.lerp(0.58, 0.82, random()));
-        instance.updateMatrix();
-        leaves.setMatrixAt(flowerIndex * 2 + leafIndex, instance.matrix);
-      }
-
-      for (let petalIndex = 0; petalIndex < 5; petalIndex += 1) {
-        const petalAngle = flower.rotation + petalIndex / 5 * Math.PI * 2;
-        instance.position.set(flower.x, blossomY, flower.z);
-        instance.rotation.set(0, petalAngle, THREE.MathUtils.lerp(-0.045, 0.045, random()));
-        instance.scale.setScalar(flower.scale * THREE.MathUtils.lerp(0.9, 1.08, random()));
-        instance.updateMatrix();
-        const petalInstanceIndex = flowerIndex * 5 + petalIndex;
-        petals.setMatrixAt(petalInstanceIndex, instance.matrix);
-        petals.setColorAt(petalInstanceIndex, petalPalette[flower.colorIndex]);
-      }
-
-      instance.position.set(flower.x, blossomY + flower.scale * 0.16, flower.z);
-      instance.rotation.set(0, 0, 0);
-      instance.scale.setScalar(flower.scale);
-      instance.updateMatrix();
-      centers.setMatrixAt(flowerIndex, instance.matrix);
-      glowPositions[flowerIndex * 3] = flower.x;
-      glowPositions[flowerIndex * 3 + 1] = blossomY + flower.scale * 0.3;
-      glowPositions[flowerIndex * 3 + 2] = flower.z;
-    });
-
-    [petals, centers, stems, leaves].forEach((mesh) => {
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.frustumCulled = false;
-    });
-    petals.instanceColor.needsUpdate = true;
-    petals.renderOrder = 5;
-    centers.renderOrder = 6;
-
-    const glowGeometry = new THREE.BufferGeometry();
-    glowGeometry.setAttribute('position', new THREE.BufferAttribute(glowPositions, 3));
-    const glowMaterial = new THREE.PointsMaterial({
-      color: '#fff4d8',
-      map: luminousGlowTexture,
-      size: state.openSeaMode === 'night' ? 10 : 8.2,
-      opacity: baseGlowOpacity,
-      transparent: true,
-      alphaTest: 0.015,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      toneMapped: false,
-      sizeAttenuation: true,
-    });
-    applyOpenSeaLunarPointWind(glowMaterial, 0.98);
-    const glow = new THREE.Points(glowGeometry, glowMaterial);
-    glow.frustumCulled = false;
-    glow.renderOrder = 7;
-
-    const layer = new THREE.Group();
-    layer.add(stems, leaves, petals, centers, glow);
-    layer.userData.openSeaLunarFlowerLayer = {
-      phase: layerIndex / 3 * Math.PI * 2,
-      glow,
-      baseGlowOpacity,
-    };
-    field.add(layer);
-  }
-  return field;
-}
-
-function openSeaLunarWindShaderPreamble(amplitude) {
-  return `
-    uniform float uOpenSeaLunarWindTime;
-
-    vec3 openSeaLunarWindOffset(vec3 anchor, float response) {
-      float primaryPhase = uOpenSeaLunarWindTime * 0.74 + anchor.x * 0.038 + anchor.z * 0.027;
-      float secondaryPhase = uOpenSeaLunarWindTime * 0.31 - anchor.x * 0.013 + anchor.z * 0.019 + 1.7;
-      float broadWave = sin(primaryPhase) * 0.72 + sin(secondaryPhase) * 0.28;
-      float crossWave = sin(primaryPhase * 0.53 + secondaryPhase * 0.37 + 2.4);
-      float gust = 0.78 + sin(uOpenSeaLunarWindTime * 0.17 + anchor.x * 0.006 - anchor.z * 0.004) * 0.22;
-      vec3 direction = vec3(
-        broadWave * 0.88 + crossWave * 0.12,
-        sin(primaryPhase + 1.1) * 0.07,
-        broadWave * 0.34 + crossWave * 0.16
-      );
-      return direction * ${amplitude.toFixed(3)} * response * gust;
-    }
-  `;
-}
-
-function applyOpenSeaLunarInstancedWind(material, mode, amplitude) {
-  const response = {
-    stem: 'pow(clamp(position.y + 0.5, 0.0, 1.0), 1.65)',
-    petal: '1.0 + clamp(position.z / 2.36, 0.0, 1.0) * 0.12',
-    leaf: '0.28 + clamp(position.z / 2.36, 0.0, 1.0) * 0.08',
-    whole: '1.0',
-  }[mode] ?? '1.0';
-  const windState = { shader: null };
-  material.userData.openSeaLunarWind = windState;
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uOpenSeaLunarWindTime = { value: 0 };
-    windState.shader = shader;
-    shader.vertexShader = shader.vertexShader
-      .replace('void main() {', `${openSeaLunarWindShaderPreamble(amplitude)}\nvoid main() {`)
-      .replace('#include <project_vertex>', `
-        vec4 mvPosition = vec4(transformed, 1.0);
-
-        #ifdef USE_BATCHING
-          mvPosition = batchingMatrix * mvPosition;
-        #endif
-
-        #ifdef USE_INSTANCING
-          vec3 openSeaLunarWindAnchor = instanceMatrix[3].xyz;
-          float openSeaLunarWindResponse = ${response};
-          mvPosition = instanceMatrix * mvPosition;
-          mvPosition.xyz += openSeaLunarWindOffset(openSeaLunarWindAnchor, openSeaLunarWindResponse);
-        #endif
-
-        mvPosition = modelViewMatrix * mvPosition;
-        gl_Position = projectionMatrix * mvPosition;
-      `)
-      .replace('#include <worldpos_vertex>', `
-        #if defined(USE_ENVMAP) || defined(DISTANCE) || defined(USE_SHADOWMAP) || defined(USE_TRANSMISSION) || NUM_SPOT_LIGHT_COORDS > 0
-          vec4 worldPosition = vec4(transformed, 1.0);
-
-          #ifdef USE_BATCHING
-            worldPosition = batchingMatrix * worldPosition;
-          #endif
-
-          #ifdef USE_INSTANCING
-            vec3 openSeaLunarWorldWindAnchor = instanceMatrix[3].xyz;
-            float openSeaLunarWorldWindResponse = ${response};
-            worldPosition = instanceMatrix * worldPosition;
-            worldPosition.xyz += openSeaLunarWindOffset(openSeaLunarWorldWindAnchor, openSeaLunarWorldWindResponse);
-          #endif
-
-          worldPosition = modelMatrix * worldPosition;
-        #endif
-      `);
-  };
-  material.customProgramCacheKey = () => `open-sea-lunar-wind-${mode}-${amplitude}`;
-}
-
-function applyOpenSeaLunarPointWind(material, amplitude) {
-  const windState = { shader: null };
-  material.userData.openSeaLunarWind = windState;
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uOpenSeaLunarWindTime = { value: 0 };
-    windState.shader = shader;
-    shader.vertexShader = shader.vertexShader
-      .replace('void main() {', `${openSeaLunarWindShaderPreamble(amplitude)}\nvoid main() {`)
-      .replace('#include <begin_vertex>', `
-        vec3 transformed = vec3(position);
-        transformed += openSeaLunarWindOffset(position, 1.0);
-      `);
-  };
-  material.customProgramCacheKey = () => `open-sea-lunar-point-wind-${amplitude}`;
-}
-
-function makeOpenSeaLunarPetalGeometry() {
-  const sections = [
-    { distance: 0, width: 0.04, height: 0 },
-    { distance: 0.28, width: 0.34, height: 0.08 },
-    { distance: 0.72, width: 0.66, height: 0.2 },
-    { distance: 1.22, width: 0.78, height: 0.31 },
-    { distance: 1.72, width: 0.62, height: 0.35 },
-    { distance: 2.12, width: 0.32, height: 0.28 },
-    { distance: 2.36, width: 0.02, height: 0.2 },
-  ];
-  const positions = [];
-  const uvs = [];
-  const indices = [];
-  sections.forEach((section, index) => {
-    positions.push(-section.width, section.height, section.distance);
-    positions.push(section.width, section.height, section.distance);
-    const v = index / (sections.length - 1);
-    uvs.push(0, v, 1, v);
-  });
-  for (let index = 0; index < sections.length - 1; index += 1) {
-    const current = index * 2;
-    const next = current + 2;
-    indices.push(current, next + 1, current + 1, current, next, next + 1);
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-function sampleOpenSeaLunarIslandProfile(normalizedRadius) {
-  const radius = THREE.MathUtils.clamp(normalizedRadius, 0, 1);
-  for (let index = 1; index < openSeaLunarIslandProfile.length; index += 1) {
-    const previous = openSeaLunarIslandProfile[index - 1];
-    const next = openSeaLunarIslandProfile[index];
-    if (radius > next.radius) continue;
-    const blend = THREE.MathUtils.smootherstep(radius, previous.radius, next.radius);
-    return THREE.MathUtils.lerp(previous.height, next.height, blend);
-  }
-  return openSeaLunarIslandProfile[openSeaLunarIslandProfile.length - 1].height;
-}
-
-function openSeaLunarIslandSurfaceNoise(angle, normalizedRadius) {
-  const centerFade = THREE.MathUtils.smoothstep(normalizedRadius, 0.04, 0.28);
-  const edgeFade = 1 - THREE.MathUtils.smoothstep(normalizedRadius, 0.78, 1);
-  return (
-    Math.sin(angle * 5 + normalizedRadius * 11.2) * 0.17
-    + Math.sin(angle * 11 - normalizedRadius * 7.4) * 0.08
-  ) * centerFade * edgeFade;
-}
-
-function getOpenSeaLunarIslandSurfaceOffset(localX, localZ) {
-  const normalizedX = localX / openSeaLunarIslandRadiusX;
-  const normalizedZ = localZ / openSeaLunarIslandRadiusZ;
-  const normalizedRadius = Math.hypot(normalizedX, normalizedZ);
-  const angle = Math.atan2(normalizedZ, normalizedX);
-  return sampleOpenSeaLunarIslandProfile(normalizedRadius)
-    + openSeaLunarIslandSurfaceNoise(angle, normalizedRadius);
+  return makeLunarGarden();
 }
 
 function getOpenSeaLunarIslandFloorHeight(x, z) {
   if (!openSeaIslandObject || state.sceneId !== 'realistic-beach') return null;
-  const localX = x - openSeaIslandObject.position.x;
-  const localZ = z - openSeaIslandObject.position.z;
-  const normalizedRadius = Math.hypot(
-    localX / openSeaLunarIslandRadiusX,
-    localZ / openSeaLunarIslandRadiusZ,
+  const surface = openSeaIslandObject.position.y + gardenHeight(
+    x - openSeaIslandObject.position.x, z - openSeaIslandObject.position.z,
   );
-  if (normalizedRadius >= 0.955) return null;
-  const islandSurface = openSeaIslandObject.position.y + getOpenSeaLunarIslandSurfaceOffset(localX, localZ);
-  return islandSurface > beachFloorHeight ? islandSurface : null;
+  return surface > beachFloorHeight ? surface : null;
 }
 
 function getOpenSeaFloorHeightAt(x, z) {
   return Math.max(beachFloorHeight, getOpenSeaLunarIslandFloorHeight(x, z) ?? beachFloorHeight);
-}
-
-function createOpenSeaLunarIslandRandom() {
-  let seed = 0x91e10da5;
-  return () => {
-    seed = (seed * 1664525 + 1013904223) >>> 0;
-    return seed / 4294967296;
-  };
 }
 
 function addOpenSeaIsland() {
@@ -2755,6 +2222,7 @@ function openSeaInstallationVideoMaterial() {
   });
   material.userData.openSeaVideoSurface = true;
   material.onBeforeCompile = (shader) => {
+    patchArcVideoSlide(shader, arcSlideUniforms);
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "float fogFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );",
@@ -3448,6 +2916,7 @@ function makeOpenSeaSky(atmosphere, sunDirection) {
 function tuneDawnWater(water, atmosphere) {
   naturalizeWater(water);
   if (atmosphere !== openSeaAtmospheres.dawn) return;
+  softenWaterShadows(water);
   water.material.uniforms.size.value = 7.0;
   water.material.uniforms.sunColor.value.multiplyScalar(1.6);
   // Shadow only direct solar illumination. Reflected sky and water scatter
@@ -4518,6 +3987,85 @@ function doubleHemisphereVideoMaterial() {
   });
 }
 
+function releaseVideo(element, texture) {
+  element.pause();
+  element.removeAttribute('src');
+  element.load();
+  element.remove();
+  texture?.dispose();
+}
+
+function cancelArcVideoLoad() {
+  if (!pendingArcVideo) return;
+  const pending = pendingArcVideo;
+  pendingArcVideo = null;
+  pending.controller.abort();
+  releaseVideo(pending.element, pending.texture);
+}
+
+function finishArcVideoSlide() {
+  arcSlideUniforms.uArcSlide.value = 1;
+  arcSlideUniforms.uArcPrevious.value = textureFallback;
+  if (!activeArcSlide) return;
+  releaseVideo(activeArcSlide.element, activeArcSlide.texture);
+  activeArcSlide = null;
+}
+
+async function loadArcVideo(video) {
+  cancelArcVideoLoad();
+  finishArcVideoSlide();
+  const element = document.createElement('video');
+  element.crossOrigin = 'anonymous';
+  element.playsInline = true;
+  element.preload = 'auto';
+  element.muted = true;
+  element.src = localVideoUrl(video, videoBaseUrl);
+  const pending = {element, controller: new AbortController(), texture: null};
+  pendingArcVideo = pending;
+  try {
+    const ready = waitForVideoReady(element, pending.controller.signal);
+    element.load();
+    await ready;
+    if (pendingArcVideo !== pending) return;
+    await element.play();
+    if (pendingArcVideo !== pending) return;
+    pending.texture = new THREE.VideoTexture(element);
+    pending.texture.colorSpace = THREE.SRGBColorSpace;
+    pending.texture.minFilter = pending.texture.magFilter = THREE.LinearFilter;
+    pending.texture.generateMipmaps = false;
+    renderer.initTexture(pending.texture);
+    const previous = videoElement;
+    activeArcSlide = {element: previous, texture: videoTexture, started: performance.now()};
+    arcSlideUniforms.uArcPrevious.value = videoTexture;
+    arcSlideUniforms.uArcSlide.value = 0;
+    element.loop = previous.loop;
+    element.volume = previous.volume;
+    element.muted = previous.muted;
+    previous.muted = true;
+    element.className = previous.className;
+    element.setAttribute('aria-hidden', 'true');
+    element.tabIndex = -1;
+    previous.replaceWith(element);
+    videoElement = element;
+    videoTexture = pending.texture;
+    activeTexture = videoTexture;
+    pendingArcVideo = null;
+    bindVideoControls(element);
+    state.videoId = video.id;
+    lastPaletteUpdate = 0;
+    lastCinemaLightSample = -Infinity;
+    refreshVideoMaterials();
+    dom.miniVideoTitle.textContent = video.title;
+    document.querySelectorAll('#video-options [data-id]').forEach(button =>
+      button.classList.toggle('is-selected', button.dataset.id === video.id));
+    syncMiniVideoControls();
+  } catch (error) {
+    if (pendingArcVideo !== pending) return;
+    cancelArcVideoLoad();
+    if (error.name !== 'AbortError') showNotice('Could not load the selected video. The current video is still playing.');
+  }
+}
+
 function setVideo(videoId) {
   const video = videoCatalog.find((item) => item.id === videoId) ?? videoCatalog[0];
   if (video.localOnly && videoBaseUrl) {
@@ -4528,12 +4076,20 @@ function setVideo(videoId) {
     showNotice('This local-only video is not available on YouTube.');
     return;
   }
+  if (state.sceneId === 'realistic-beach' && state.started && videoElement.readyState >= 2) {
+    if (video.id === state.videoId) { cancelArcVideoLoad(); return; }
+    void loadArcVideo(video);
+    return;
+  }
+  cancelArcVideoLoad();
+  finishArcVideoSlide();
   state.videoId = video.id;
   lastPaletteUpdate = 0;
   resetMiniVideoControls();
   videoElement.pause();
   videoElement.src = localVideoUrl(video, videoBaseUrl);
   videoElement.load();
+  videoTexture.dispose();
   videoTexture = new THREE.VideoTexture(videoElement);
   videoTexture.colorSpace = THREE.SRGBColorSpace;
   videoTexture.minFilter = THREE.LinearFilter;
@@ -4543,7 +4099,10 @@ function setVideo(videoId) {
   refreshVideoMaterials();
   dom.miniVideoTitle.textContent = video.title;
   document.querySelectorAll('#video-options [data-id]').forEach((button) => button.classList.toggle('is-selected', button.dataset.id === video.id));
+  const requestedElement = videoElement;
+  const requestedTexture = videoTexture;
   videoElement.addEventListener('error', () => {
+    if (videoElement !== requestedElement || videoTexture !== requestedTexture) return;
     activeTexture = textureFallback;
     refreshVideoMaterials();
     showNotice('Could not load this local file. Check the filename in src/data/catalog.js.');
@@ -5441,7 +5000,36 @@ function getViewDirection() {
   return new THREE.Vector3(Math.sin(yaw) * horizontal, Math.sin(pitch), -Math.cos(yaw) * horizontal).normalize();
 }
 
+function warmFirstPersonView() {
+  const previousCameraPosition = camera.position.clone();
+  const previousCameraQuaternion = camera.quaternion.clone();
+  const previousAvatarVisibility = avatarRoot.visible;
+  const forward = getViewDirection();
+  const firstPersonPosition = player.position.clone().add(new THREE.Vector3(0, 1.1, 0)).addScaledVector(forward, 0.18);
+  const target = player.position.clone().add(new THREE.Vector3(0, 1, 0)).addScaledVector(forward, state.sceneId === 'realistic-beach' ? 12 : 5.5);
+
+  try {
+    // Compile and render the camera state used after the zoom while the scene
+    // loader is still covering the canvas. This moves the first-use WebGL hitch
+    // out of the user's first transition into first person.
+    camera.position.copy(firstPersonPosition);
+    cameraLookMatrix.lookAt(camera.position, target, camera.up);
+    camera.quaternion.setFromRotationMatrix(cameraLookMatrix);
+    camera.updateMatrixWorld();
+    avatarRoot.visible = false;
+    world.updateMatrixWorld(true);
+    renderer.compile(world, camera);
+    composer.render();
+  } finally {
+    camera.position.copy(previousCameraPosition);
+    camera.quaternion.copy(previousCameraQuaternion);
+    camera.updateMatrixWorld();
+    avatarRoot.visible = previousAvatarVisibility;
+  }
+}
+
 function updatePlayer(delta) {
+  const previousPosition = player.position.clone();
   const forward = getViewDirection();
   const right = new THREE.Vector3(Math.cos(yaw), 0, Math.sin(yaw));
   const direction = new THREE.Vector3();
@@ -5510,8 +5098,12 @@ function updatePlayer(delta) {
   } else {
     playerVelocity.set(0, 0, 0);
   }
+  if (state.sceneId === 'realistic-beach' && openSeaIslandObject) {
+    resolveLunarGardenCollisions(openSeaIslandObject, previousPosition,
+      player.position, playerVelocity, getAvatarCollisionRadius());
+  }
   applyPlayerFloorCollision();
-  resolveOpenSeaInstallationCollisions();
+  resolveOpenSeaInstallationCollisions(previousPosition);
   resolveCinemaChairCollisions();
   const horizontalForward = new THREE.Vector3(forward.x, 0, forward.z);
   if (horizontalForward.lengthSq() > 0.0001) {
@@ -5578,7 +5170,7 @@ function resolveCinemaChairCollisions() {
   }
 }
 
-function resolveOpenSeaInstallationCollisions() {
+function resolveOpenSeaInstallationCollisions(previousPosition = null) {
   if (state.sceneId !== 'realistic-beach' || !openSeaOrbitGroup) return;
   // Solve against the original stationary geometry in the orbit's frame.
   // Subtract the wall's angular velocity so it can gently push a still avatar.
@@ -5588,7 +5180,7 @@ function resolveOpenSeaInstallationCollisions() {
   const velocity = playerVelocity.clone().sub(wallVelocity).applyAxisAngle(openSeaOrbitAxis, -openSeaOrbitAngle);
   position.applyAxisAngle(openSeaOrbitAxis, -openSeaOrbitAngle);
   position.z += openSeaInstallationCenterZ;
-  resolveOpenSeaLocalInstallationCollisions({ position }, velocity);
+  resolveOpenSeaLocalInstallationCollisions({ position }, velocity, previousPosition?.y);
   position.z -= openSeaInstallationCenterZ;
   position.applyAxisAngle(openSeaOrbitAxis, openSeaOrbitAngle);
   wallVelocity.set(position.z, 0, -position.x).multiplyScalar(openSeaOrbitActualSpeed);
@@ -5597,7 +5189,7 @@ function resolveOpenSeaInstallationCollisions() {
   playerVelocity.copy(velocity.applyAxisAngle(openSeaOrbitAxis, openSeaOrbitAngle).add(wallVelocity));
 }
 
-function resolveOpenSeaLocalInstallationCollisions(player, playerVelocity) {
+function resolveOpenSeaLocalInstallationCollisions(player, playerVelocity, previousY) {
   if (state.sceneId !== 'realistic-beach') return;
 
   const horizontalRadius = getAvatarCollisionRadius();
@@ -5606,6 +5198,31 @@ function resolveOpenSeaLocalInstallationCollisions(player, playerVelocity) {
   const wallBottom = openSeaInstallationBaseY;
   const wallTop = openSeaInstallationBaseY + openSeaInstallationHeight;
   if (avatarCenterY - verticalRadius > wallTop || avatarCenterY + verticalRadius < wallBottom) return;
+
+  // Land on the roof (or stop below the base) before resolving side walls.
+  // Previously all overlaps were pushed radially, including roof contacts.
+  for (const sideSign of [-1, 1]) {
+    const offsetX = player.position.x - sideSign * openSeaInstallationCenterX;
+    const offsetZ = player.position.z - openSeaInstallationCenterZ;
+    const radius = Math.hypot(offsetX, offsetZ);
+    const inner = openSeaInstallationInnerRadius - horizontalRadius;
+    const outer = openSeaInstallationOuterRadius + horizontalRadius;
+    if (sideSign * offsetX < -horizontalRadius || radius <= inner || radius >= outer) continue;
+    const sidePenetration = Math.min(radius - inner, outer - radius, sideSign * offsetX + horizontalRadius);
+    const topPenetration = wallTop + verticalRadius - avatarCenterY;
+    const bottomPenetration = avatarCenterY + verticalRadius - wallBottom;
+    const previousCenter = previousY === undefined ? avatarCenterY : previousY + avatarRoot.position.y;
+    if (previousCenter - verticalRadius >= wallTop - 0.01 || topPenetration <= Math.min(sidePenetration, bottomPenetration)) {
+      player.position.y = wallTop + verticalRadius - avatarRoot.position.y + 0.001;
+      playerVelocity.y = Math.max(0, playerVelocity.y);
+      return;
+    }
+    if (previousCenter + verticalRadius <= wallBottom + 0.01 || bottomPenetration < sidePenetration) {
+      player.position.y = wallBottom - verticalRadius - avatarRoot.position.y - 0.001;
+      playerVelocity.y = Math.min(0, playerVelocity.y);
+      return;
+    }
+  }
 
   // Resolve twice because an avatar can touch an inner/outer curve and an end
   // cap in the same frame, especially while using the forward boost.
@@ -5837,6 +5454,16 @@ function updateCamera(delta, snap = false) {
   }
   const desiredFloorHeight = getCameraFloorHeight(desiredPosition.x, desiredPosition.z);
   if (desiredFloorHeight !== null) desiredPosition.y = Math.max(desiredPosition.y, desiredFloorHeight + 0.58);
+  const cameraAnchor = player.position.clone().add(avatarRoot.position);
+  const cameraArcs = state.sceneId === 'realistic-beach' && openSeaOrbitGroup ? {
+    angle: openSeaOrbitAngle, centerX: openSeaInstallationCenterX, centerZ: openSeaInstallationCenterZ,
+    innerRadius: openSeaInstallationInnerRadius, outerRadius: openSeaInstallationOuterRadius,
+    bottom: openSeaInstallationBaseY, top: openSeaInstallationBaseY + openSeaInstallationHeight,
+  } : null;
+  // Enclose the near-plane corners too, not just the camera's optical center.
+  const nearHalfHeight = camera.near * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const cameraPadding = Math.max(0.35, Math.hypot(camera.near, nearHalfHeight, nearHalfHeight * camera.aspect) + 0.08);
+  if (cameraArcs) clampArcCamera(cameraAnchor, desiredPosition, cameraArcs, cameraPadding);
   const targetHeight = 1;
   const targetDistance = state.sceneId === 'realistic-beach' ? 12 : 5.5;
   const target = player.position.clone().add(new THREE.Vector3(0, targetHeight, 0)).addScaledVector(forward, targetDistance);
@@ -5845,12 +5472,18 @@ function updateCamera(delta, snap = false) {
   const cameraFloorHeight = getCameraFloorHeight(camera.position.x, camera.position.z);
   if (cameraFloorHeight !== null) camera.position.y = Math.max(camera.position.y, cameraFloorHeight + 0.58);
   if (firstPersonBlend > 0.999) {
-    camera.position.copy(desiredPosition);
+    // Keep the normal damped transition when a large wheel event jumps past
+    // the threshold; only snap once the camera is already close enough that
+    // the correction cannot be perceived as a cut.
+    if (camera.position.distanceToSquared(desiredPosition) < 0.04) camera.position.copy(desiredPosition);
     avatarHiddenForFirstPerson = true;
   } else if (avatarHiddenForFirstPerson && firstPersonBlend < 0.9 && camera.position.distanceTo(firstPersonPosition) > 0.65) {
     avatarHiddenForFirstPerson = false;
   }
   avatarRoot.visible = !avatarHiddenForFirstPerson;
+  // Damping can cut through a wall even if its destination is safe. Contract
+  // immediately after all position adjustments; recovery keeps normal damping.
+  if (cameraArcs) clampArcCamera(cameraAnchor, camera.position, cameraArcs, cameraPadding);
   cameraLookMatrix.lookAt(camera.position, target, camera.up);
   cameraDesiredQuaternion.setFromRotationMatrix(cameraLookMatrix);
   camera.quaternion.slerp(cameraDesiredQuaternion, cameraBlend);
@@ -5865,6 +5498,11 @@ function getCameraFloorHeight(x, z) {
 }
 
 function animate() {
+  if (activeArcSlide) {
+    const progress = Math.min(1, (performance.now() - activeArcSlide.started) / 750);
+    arcSlideUniforms.uArcSlide.value = progress * progress * (3 - 2 * progress);
+    if (progress >= 1) finishArcVideoSlide();
+  }
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.05);
   if (openSeaOrbitGroup) {

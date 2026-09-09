@@ -36,7 +36,13 @@ export const volumetricCloudShader = `
     if (h <= 0.0 || h >= 1.0) return 0.0;
     vec3 moving = p + vec3(3.5, 0.0, 1.2) * (uTime * 1.5);
     float weatherField = textureLod(cloudNoise, vec3(moving.x / 21000.0 + 0.17, 0.37, moving.z / 21000.0 + 0.43), 0.0).r;
-    float weather = smoothstep(0.42, 0.70, weatherField);
+    // A broad, softly varying fair-weather region toward the sun. Reduce
+    // cloud coverage in the density field so remaining clouds still occlude
+    // the disc and halo, with the same density used for light and view rays.
+    float sunward = dot(normalize(p - cloudOrigin), sunDirection);
+    float fairWeather = smoothstep(0.94, 0.995, sunward);
+    float coverageShift = 0.12 * fairWeather;
+    float weather = smoothstep(0.42 + coverageShift, 0.70 + coverageShift, weatherField);
     if (weather < 0.035) return 0.0;
     vec3 uv = moving / 3000.0 + vec3(0.12, 0.29, 0.41);
     float lod = clamp(log2(max(footprint / 31.25, 1.0)), 0.0, 3.0);

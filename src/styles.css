@@ -62,9 +62,6 @@ button { color: inherit; }
 .section-heading { display: flex; justify-content: space-between; margin-bottom: .7rem; color: rgba(255,255,255,.7); font: .64rem 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
 .choice-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; }
 .choice-grid--scenes { grid-template-columns: repeat(2, 1fr); }
-.scene-suboptions { margin-top: .85rem; padding-top: .8rem; border-top: 1px solid rgba(255,255,255,.08); }
-.scene-suboptions[hidden] { display: none; }
-.choice-grid--open-sea-modes { grid-template-columns: repeat(3, 1fr); }
 .choice-card, .avatar-card, .video-card { border: 1px solid rgba(255,255,255,.1); cursor: pointer; text-align: left; transition: border-color .2s ease, background .2s ease, transform .2s ease; }
 .choice-card:hover, .avatar-card:hover, .video-card:hover { transform: translateY(-2px); border-color: rgba(240,213,251,.5); }
 .choice-card.is-selected, .avatar-card.is-selected, .video-card.is-selected { border-color: rgba(240,213,251,.86); background: rgba(191, 147, 227, .13); }
