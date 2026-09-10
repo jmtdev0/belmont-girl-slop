@@ -10,6 +10,8 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { makeDawnSky } from './DawnSky.js';
+import { SunGlarePass } from './SunGlarePass.js';
+import { createDistantSeagulls } from './DistantSeagulls.js';
 import { createCloudVolume } from './VolumetricClouds.js';
 import { CSS3DObject, CSS3DRenderer } from 'three/addons/renderers/CSS3DRenderer.js';
 import { Sky } from 'three/addons/objects/Sky.js';
@@ -23,6 +25,8 @@ import './styles.css';
 // Share one clock between the visible dawn sky and the prism reflection sky.
 const openSeaSkyTime = { value: 0 };
 let openSeaCloudVolume = null;
+let openSeaSunDirection = null;
+let openSeaSeagulls = null;
 
 const scenes = [
   { id: 'sphere', label: 'Enveloping sphere', description: 'Inside a sphere of memory', icon: '◌' },
@@ -208,6 +212,8 @@ camera.position.set(0, 3.5, 8);
 const composer = new EffectComposer(renderer);
 enableComposerAntialiasing(renderer, composer);
 composer.addPass(new RenderPass(world, camera));
+const sunGlarePass = new SunGlarePass();
+composer.addPass(sunGlarePass);
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.18, 0.24, 0.94);
 composer.addPass(bloomPass);
 // The dawn lighting is authored in linear HDR and needs a display transform
@@ -239,6 +245,19 @@ videoElement.tabIndex = -1;
 let lastAudibleVolume = Number(dom.miniVideoVolume?.value ?? 0.85);
 videoElement.volume = lastAudibleVolume;
 dom.miniPlayer.prepend(videoElement);
+const seaAudio = new Audio('/audio/ocean-waves-calm-freesound.mp3');
+seaAudio.loop = true;
+seaAudio.preload = 'auto';
+seaAudio.setAttribute('aria-hidden', 'true');
+seaAudio.setAttribute('data-audio-role', 'sea-ambience');
+seaAudio.tabIndex = -1;
+document.body.append(seaAudio);
+const seaAudioMaxVolume = 0.2;
+const seaAudioMinVolume = 0.004;
+const seaAudioFadeDistance = 24;
+const seaAudioIslandRadius = 260;
+const seaAudioIslandFadeDistance = 220;
+let seaAudioStarted = false;
 const cinemaLightCanvas = document.createElement('canvas');
 cinemaLightCanvas.width = 48;
 cinemaLightCanvas.height = 27;
@@ -282,7 +301,9 @@ let openSeaOrbitGroup = null;
 let openSeaOrbitAngle = 0;
 let openSeaOrbitTargetAngle = 0;
 let openSeaOrbitActualSpeed = 0;
+let openSeaOrbitWaitStartedAt = null;
 const openSeaOrbitSpeed = Math.PI * 2 / (16 * 60);
+const openSeaOrbitStartDelay = 60_000;
 const openSeaOrbitAxis = new THREE.Vector3(0, 1, 0);
 let realisticBeachEnvironment = null;
 let proceduralSandNoise = null;
@@ -318,6 +339,7 @@ const beachLandDepth = 6500;
 const beachOceanWidth = 18000;
 const beachOceanDepth = 19500;
 const beachFloorHeight = -0.58;
+const openSeaWaterSurfaceY = beachFloorHeight - 0.08;
 const realisticSeaPrismEdgeRadius = 16;
 const realisticSeaPrismDepth = 120;
 const realisticSeaPrismSurfaceOverlap = 1.5;
@@ -375,6 +397,16 @@ let cameraDistance = state.sceneId === 'sphere' ? 8.5 : 9;
 let dragging = false;
 let menuPointerNear = false;
 let miniPlayerDismissTimer = 0;
+let mobileCornerHideTimer = 0;
+const mobileCornerHideDelay = 4000;
+let mobileControlsDismissed = false;
+let mobileJoystickHideTimer = 0;
+const mobileJoystickMeaningfulDuration = 1800;
+const mobileJoystickMeaningfulPath = 2.5;
+const mobileJoystickReleaseHideDelay = 400;
+const mobilePinchZoomScale = 0.018;
+const mobileTouchZoneTop = 160;
+const mobileTouchMoveRadius = 96;
 let lastPointer = { x: 0, y: 0 };
 let lastPaletteUpdate = 0;
 let butterflyFlutterPhase = 0;
@@ -403,10 +435,15 @@ const keys = new Set();
 const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'e', 'alt', 'shift', 'q']);
 const gamepadInput = { moveX: 0, moveY: 0, lookX: 0, lookY: 0, ascend: 0, descend: 0 };
 const mobileInput = { moveX: 0, moveY: 0, lookX: 0, lookY: 0 };
+const mobileTouchInput = { moveX: 0, moveY: 0 };
 const mobileJoysticks = {
-  look: { element: null, knob: null, pointerId: null, originX: 0, originY: 0, x: 0, y: 0 },
-  move: { element: null, knob: null, pointerId: null, originX: 0, originY: 0, x: 0, y: 0 },
+  look: { element: null, knob: null, pointerId: null, originX: 0, originY: 0, x: 0, y: 0, interactionStartedAt: 0, travelDistance: 0, lastClientX: 0, lastClientY: 0 },
+  move: { element: null, knob: null, pointerId: null, originX: 0, originY: 0, x: 0, y: 0, interactionStartedAt: 0, travelDistance: 0, lastClientX: 0, lastClientY: 0 },
 };
+const activeCanvasPointers = new Map();
+let pinchStartDistance = 0;
+let pinchStartCameraDistance = 0;
+let pinchGestureActive = false;
 const mobileLookSpeed = 2.7;
 let activeGamepadIndex = null;
 let lastWPressTime = -Infinity;
@@ -423,6 +460,7 @@ const forwardBoostFlutterDuration = 0.82;
 const highSpeedSequence = ['6', '7', '6', '7'];
 const highSpeedSequenceWindow = 520;
 const highSpeedMultiplier = 6.7;
+const arcVideoSlideDuration = 1200;
 
 world.add(stage, player, butterflyDustWorld);
 player.add(avatarRoot);
@@ -452,7 +490,10 @@ function buildInterface() {
     button.className = 'choice-card';
     button.dataset.id = item.id;
     button.innerHTML = `<span class="choice-card__icon">${item.icon}</span><span><strong>${item.label}</strong><small>${item.description}</small></span>`;
-    button.addEventListener('click', () => setScene(item.id));
+    button.addEventListener('click', () => {
+      if (state.started && item.id === 'realistic-beach') void startSeaAudio(item.id);
+      setScene(item.id);
+    });
     dom.sceneOptions.append(button);
     if (item.id === state.sceneId) button.classList.add('is-selected');
   });
@@ -540,7 +581,11 @@ function buildInterface() {
   dom.enterButton.addEventListener('click', async () => {
     state.started = true;
     dom.welcome.classList.add('is-hidden');
+    resetOpenSeaOrbitDelay();
+    mobileControlsDismissed = false;
     syncMobileControls();
+    scheduleMobileCornerDismissal();
+    await startSeaAudio();
     await playVideoWithAudio();
   });
   dom.menuButton.addEventListener('click', () => toggleMenu(true));
@@ -593,7 +638,37 @@ function buildInterface() {
     resetGamepadInput();
     clearMovementState();
   });
+  window.addEventListener('pointerdown', (event) => {
+    if (!state.started || !isMobileInputDevice()) return;
+    const target = event.target;
+    const insidePlayer = target instanceof Node && dom.miniPlayer.contains(target);
+    const insidePlayerControls = target instanceof Node
+      && Boolean(target.closest?.('.mini-player__controls, .mini-player__meta, .mini-player__toggle'));
+    const insideTopbar = target instanceof Node
+      && (dom.menuButton.contains(target) || dom.fullscreenButton.contains(target));
+    const insideMenu = target instanceof Node && dom.menu.contains(target);
+    const cornerHitWidth = Math.min(240, Math.max(160, window.innerWidth * 0.42));
+    const nearLeftCorner = event.clientX < cornerHitWidth && event.clientY < 160;
+    const nearRightCorner = event.clientX > window.innerWidth - cornerHitWidth && event.clientY < 160;
+    if (nearLeftCorner) {
+      if (dom.miniPlayer.classList.contains('is-mobile-hidden')) revealMiniPlayer();
+      else if (!insidePlayer || !insidePlayerControls) hideMobileCorner('player');
+      if (!insidePlayer || !insidePlayerControls) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    } else if (nearRightCorner) {
+      const controlsHidden = dom.menuButton.classList.contains('is-mobile-hidden');
+      if (controlsHidden) revealCornerControls(true);
+      else if (!insideTopbar && !insideMenu) hideMobileCorner('controls');
+      if (!insideTopbar && !insideMenu) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }
+  }, { capture: true });
   window.addEventListener('pointermove', (event) => {
+    if (isMobileInputDevice()) return;
     menuPointerNear = event.clientX > window.innerWidth - 280 && event.clientY < 140;
     revealCornerControls(menuPointerNear || dom.menu.classList.contains('is-open'));
     if (event.clientX < 280 && event.clientY > window.innerHeight - 230) revealMiniPlayer();
@@ -605,18 +680,71 @@ function buildInterface() {
     if (document.hidden) clearMovementState();
   });
   dom.canvas.addEventListener('pointerdown', (event) => {
-    dragging = true;
+    const mode = getMobileTouchMode(event.clientX, event.clientY);
+    activeCanvasPointers.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+      mode,
+      originX: event.clientX,
+      originY: event.clientY,
+    });
+    if (isMobileInputDevice() && activeCanvasPointers.size >= 2) {
+      pinchStartDistance = getCanvasPinchDistance();
+      pinchStartCameraDistance = cameraDistance;
+      pinchGestureActive = true;
+      mobileTouchInput.moveX = 0;
+      mobileTouchInput.moveY = 0;
+      dragging = false;
+    } else if (mode === 'move') {
+      mobileTouchInput.moveX = 0;
+      mobileTouchInput.moveY = 0;
+      dragging = false;
+    } else {
+      dragging = true;
+    }
     lastPointer = { x: event.clientX, y: event.clientY };
     dom.canvas.setPointerCapture(event.pointerId);
   });
   dom.canvas.addEventListener('pointerup', (event) => {
-    dragging = false;
-    dom.canvas.releasePointerCapture(event.pointerId);
+    finishCanvasPointer(event);
   });
-  dom.canvas.addEventListener('pointercancel', () => {
-    dragging = false;
+  dom.canvas.addEventListener('pointercancel', (event) => {
+    finishCanvasPointer(event);
   });
   dom.canvas.addEventListener('pointermove', (event) => {
+    const activePointer = activeCanvasPointers.get(event.pointerId);
+    if (isMobileInputDevice() && activePointer) {
+      const deltaX = event.clientX - activePointer.x;
+      const deltaY = event.clientY - activePointer.y;
+      activePointer.x = event.clientX;
+      activePointer.y = event.clientY;
+      if (activeCanvasPointers.size >= 2) {
+        if (!pinchGestureActive) {
+          pinchStartDistance = getCanvasPinchDistance();
+          pinchStartCameraDistance = cameraDistance;
+          pinchGestureActive = true;
+        }
+        const pinchDistance = getCanvasPinchDistance();
+        cameraDistance = THREE.MathUtils.clamp(
+          pinchStartCameraDistance - (pinchDistance - pinchStartDistance) * mobilePinchZoomScale,
+          2.6,
+          24,
+        );
+        dragging = false;
+        return;
+      }
+      if (activePointer.mode === 'move') {
+        updateMobileTouchMovement(activePointer, event.clientX, event.clientY);
+        return;
+      }
+      if (activePointer.mode === 'look') {
+        yaw += deltaX * 0.005;
+        const maximumPitch = avatarHiddenForFirstPerson ? Math.PI / 2 - 0.01 : 1.1;
+        const minimumPitch = avatarHiddenForFirstPerson ? -Math.PI / 2 + 0.01 : -1.1;
+        pitch = THREE.MathUtils.clamp(pitch - deltaY * 0.006, minimumPitch, maximumPitch);
+        return;
+      }
+    }
     if (!dragging) return;
     yaw += (event.clientX - lastPointer.x) * 0.005;
     const maximumPitch = avatarHiddenForFirstPerson ? Math.PI / 2 - 0.01 : 1.1;
@@ -631,9 +759,76 @@ function buildInterface() {
   window.addEventListener('resize', onResize);
 }
 
+function getCanvasPinchDistance() {
+  const points = Array.from(activeCanvasPointers.values()).slice(0, 2);
+  if (points.length < 2) return 0;
+  return Math.max(1, Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y));
+}
+
+function getMobileTouchMode(clientX, clientY) {
+  if (!isMobileInputDevice() || clientY < mobileTouchZoneTop) return null;
+  return clientX < window.innerWidth / 2 ? 'move' : 'look';
+}
+
+function updateMobileTouchMovement(pointer, clientX, clientY) {
+  let offsetX = clientX - pointer.originX;
+  let offsetY = clientY - pointer.originY;
+  const distance = Math.hypot(offsetX, offsetY);
+  if (distance > mobileTouchMoveRadius) {
+    const scale = mobileTouchMoveRadius / distance;
+    offsetX *= scale;
+    offsetY *= scale;
+  }
+  const deadzone = 0.12;
+  const remap = (value) => {
+    const magnitude = Math.abs(value);
+    if (magnitude <= deadzone) return 0;
+    return Math.sign(value) * ((magnitude - deadzone) / (1 - deadzone));
+  };
+  mobileTouchInput.moveX = remap(offsetX / mobileTouchMoveRadius);
+  mobileTouchInput.moveY = remap(offsetY / mobileTouchMoveRadius);
+}
+
+function finishCanvasPointer(event) {
+  const wasPinching = pinchGestureActive;
+  const finishedPointer = activeCanvasPointers.get(event.pointerId);
+  activeCanvasPointers.delete(event.pointerId);
+  if (activeCanvasPointers.size < 2) {
+    pinchGestureActive = false;
+    pinchStartDistance = 0;
+    pinchStartCameraDistance = 0;
+  }
+  if (wasPinching && activeCanvasPointers.size === 1) {
+    const remainingPointer = activeCanvasPointers.values().next().value;
+    lastPointer = { x: remainingPointer.x, y: remainingPointer.y };
+    if (remainingPointer.mode === 'move') {
+      updateMobileTouchMovement(remainingPointer, remainingPointer.x, remainingPointer.y);
+      dragging = false;
+    } else {
+      mobileTouchInput.moveX = 0;
+      mobileTouchInput.moveY = 0;
+      dragging = true;
+    }
+  } else if (activeCanvasPointers.size === 0) {
+    mobileTouchInput.moveX = 0;
+    mobileTouchInput.moveY = 0;
+    dragging = false;
+  } else if (finishedPointer?.mode === 'move') {
+    mobileTouchInput.moveX = 0;
+    mobileTouchInput.moveY = 0;
+  }
+  if (dom.canvas.hasPointerCapture?.(event.pointerId)) dom.canvas.releasePointerCapture(event.pointerId);
+}
+
 function clearMovementState() {
   keys.clear();
   dragging = false;
+  activeCanvasPointers.clear();
+  pinchStartDistance = 0;
+  pinchStartCameraDistance = 0;
+  pinchGestureActive = false;
+  mobileTouchInput.moveX = 0;
+  mobileTouchInput.moveY = 0;
   resetMobileJoysticks();
   playerVelocity.set(0, 0, 0);
   lastWPressTime = -Infinity;
@@ -674,7 +869,8 @@ function resetGamepadInput() {
 }
 
 function syncMobileControls() {
-  dom.mobileControls.classList.toggle('is-active', state.started && !dom.menu.classList.contains('is-open'));
+  dom.mobileControls.classList.toggle('is-active', state.started
+    && !mobileControlsDismissed && !dom.menu.classList.contains('is-open'));
 }
 
 function bindMobileJoysticks() {
@@ -695,6 +891,10 @@ function bindMobileJoystick(type, element) {
     joystick.pointerId = event.pointerId;
     joystick.originX = bounds.left + bounds.width / 2;
     joystick.originY = bounds.top + bounds.height / 2;
+    joystick.interactionStartedAt = performance.now();
+    joystick.travelDistance = 0;
+    joystick.lastClientX = event.clientX;
+    joystick.lastClientY = event.clientY;
     element.setPointerCapture(event.pointerId);
     updateMobileJoystick(type, event.clientX, event.clientY);
   });
@@ -717,6 +917,9 @@ function updateMobileJoystick(type, clientX, clientY) {
   const joystick = mobileJoysticks[type];
   const bounds = joystick.element.getBoundingClientRect();
   const maxDistance = Math.max(1, bounds.width * 0.28);
+  joystick.travelDistance += Math.hypot(clientX - joystick.lastClientX, clientY - joystick.lastClientY);
+  joystick.lastClientX = clientX;
+  joystick.lastClientY = clientY;
   let offsetX = clientX - joystick.originX;
   let offsetY = clientY - joystick.originY;
   const distance = Math.hypot(offsetX, offsetY);
@@ -746,10 +949,18 @@ function updateMobileJoystick(type, clientX, clientY) {
 function resetMobileJoystick(type) {
   const joystick = mobileJoysticks[type];
   if (!joystick) return;
+  const maxDistance = joystick.element ? Math.max(1, joystick.element.getBoundingClientRect().width * 0.28) : 1;
+  const meaningful = joystick.interactionStartedAt > 0
+    && (performance.now() - joystick.interactionStartedAt >= mobileJoystickMeaningfulDuration
+      || joystick.travelDistance >= maxDistance * mobileJoystickMeaningfulPath);
   if (joystick.pointerId !== null && joystick.element.hasPointerCapture?.(joystick.pointerId)) {
     joystick.element.releasePointerCapture(joystick.pointerId);
   }
   joystick.pointerId = null;
+  joystick.interactionStartedAt = 0;
+  joystick.travelDistance = 0;
+  joystick.lastClientX = 0;
+  joystick.lastClientY = 0;
   joystick.x = 0;
   joystick.y = 0;
   joystick.knob.style.transform = 'translate3d(0, 0, 0) translate(-50%, -50%)';
@@ -760,6 +971,7 @@ function resetMobileJoystick(type) {
     mobileInput.moveX = 0;
     mobileInput.moveY = 0;
   }
+  if (meaningful) scheduleMobileJoystickDismissal();
 }
 
 function resetMobileJoysticks() {
@@ -846,6 +1058,10 @@ function scheduleMiniPlayerDismissal() {
 }
 
 function revealMiniPlayer() {
+  if (isMobileInputDevice()) {
+    revealMobileCorner('player');
+    return;
+  }
   if (!dom.miniPlayer.classList.contains('is-dismissed')) return;
   window.clearTimeout(miniPlayerDismissTimer);
   dom.miniPlayer.classList.remove('is-dismissed', 'is-collapsed');
@@ -895,6 +1111,12 @@ function getOpenSeaAtmosphere() {
   return openSeaAtmospheres[state.openSeaMode] ?? openSeaAtmospheres.dawn;
 }
 
+function resetOpenSeaOrbitDelay(shouldDelay = state.sceneId === 'realistic-beach') {
+  openSeaOrbitWaitStartedAt = shouldDelay && state.started ? performance.now() : null;
+  openSeaOrbitTargetAngle = openSeaOrbitAngle;
+  openSeaOrbitActualSpeed = 0;
+}
+
 function setScene(sceneId, { force = false } = {}) {
   const scene = scenes.find((item) => item.id === sceneId);
   if (!scene || (!force && state.sceneId === sceneId && sceneObjects.length > 0)) return;
@@ -940,6 +1162,9 @@ function applyScene(sceneId) {
   }
   world.environment = null;
   state.sceneId = sceneId;
+  if (sceneId !== 'realistic-beach') stopSeaAudio();
+  else if (state.started) void startSeaAudio(sceneId);
+  resetOpenSeaOrbitDelay(sceneId === 'realistic-beach');
   const isCinema = ['cinema', 'youtube-cinema'].includes(sceneId);
   const isRealisticBeach = sceneId === 'realistic-beach';
   const atmosphere = isRealisticBeach ? getOpenSeaAtmosphere() : null;
@@ -1014,7 +1239,11 @@ function applyScene(sceneId) {
 }
 
 function clearScene() {
+  openSeaSunDirection = null;
+  sunGlarePass.enabled = false;
+  openSeaSeagulls = null;
   openSeaOrbitGroup = null;
+  openSeaOrbitActualSpeed = 0;
   openSeaCloudVolume?.dispose();
   openSeaCloudVolume = null;
   // Invalidate an in-flight GLB request before disposing the current scene.
@@ -1249,6 +1478,7 @@ function buildRealisticBeachScene() {
   const sunAzimuth = THREE.MathUtils.degToRad(atmosphere.sunAzimuth);
   sun.setFromSphericalCoords(1, Math.PI / 2 - sunElevation, sunAzimuth);
   const sky = makeOpenSeaSky(atmosphere, sun);
+  if (state.openSeaMode === 'dawn') openSeaSunDirection = sun.clone();
   addToStage(sky);
 
   if (state.openSeaMode === 'dawn') {
@@ -1365,6 +1595,9 @@ function buildRealisticBeachScene() {
   ].forEach((side) => openSeaOrbitGroup.add(makeOpenSeaVideoInstallation({ ...installationOptions, ...side })));
   addToStage(openSeaOrbitGroup);
   addOpenSeaLunarTearIsland();
+
+  openSeaSeagulls = createDistantSeagulls();
+  addToStage(openSeaSeagulls.group);
 
   // This version is open sea only: the water is the sole physical surface.
   // Keep the sky and the two horizontal video installations, but do not add
@@ -4934,6 +5167,7 @@ function addFramedGlow(position, color) {
 }
 
 async function playVideoWithAudio() {
+  if (state.sceneId === 'realistic-beach') await startSeaAudio();
   if (state.sceneId === 'youtube-cinema') {
     videoElement.muted = true;
     videoElement.volume = 0;
@@ -4967,11 +5201,117 @@ function toggleMenu(isOpen) {
   dom.menuButton.setAttribute('aria-expanded', String(isOpen));
   syncMobileControls();
   revealCornerControls(isOpen || menuPointerNear);
+  if (!isOpen) scheduleMobileCornerDismissal();
+}
+
+async function startSeaAudio(sceneId = state.sceneId) {
+  if (sceneId !== 'realistic-beach') return;
+  seaAudio.volume = getSeaAudioVolume();
+  try {
+    await seaAudio.play();
+    seaAudioStarted = true;
+  } catch {
+    // Browsers can still reject playback after a scene transition. The next
+    // explicit interaction will retry without affecting the rest of the app.
+  }
+}
+
+function stopSeaAudio() {
+  seaAudio.pause();
+  seaAudio.currentTime = 0;
+  seaAudioStarted = false;
+  seaAudio.volume = 0;
+}
+
+function getSeaAudioVolume() {
+  const distanceToWater = Math.max(
+    0,
+    player.position.y + avatarRoot.position.y - openSeaWaterSurfaceY - avatarFloorClearance,
+  );
+  const distanceRatio = THREE.MathUtils.clamp(distanceToWater / seaAudioFadeDistance, 0, 1);
+  const waterProximity = 1 - THREE.MathUtils.smoothstep(distanceRatio, 0, 1);
+  const islandCenterX = openSeaIslandObject?.position.x ?? 0;
+  const islandCenterZ = openSeaIslandObject?.position.z ?? openSeaInstallationCenterZ;
+  const distanceToIsland = Math.hypot(
+    player.position.x - islandCenterX,
+    player.position.z - islandCenterZ,
+  );
+  const islandProximity = 1 - THREE.MathUtils.smoothstep(
+    distanceToIsland,
+    seaAudioIslandRadius,
+    seaAudioIslandRadius + seaAudioIslandFadeDistance,
+  );
+  const waterVolume = THREE.MathUtils.lerp(seaAudioMinVolume, seaAudioMaxVolume, waterProximity);
+  return waterVolume * islandProximity;
+}
+
+function updateSeaAudio() {
+  if (state.sceneId !== 'realistic-beach') return;
+  if (!seaAudioStarted) return;
+  seaAudio.volume = getSeaAudioVolume();
 }
 
 function revealCornerControls(isVisible) {
+  if (isMobileInputDevice()) {
+    if (isVisible) revealMobileCorner('controls');
+    return;
+  }
   dom.fullscreenButton.classList.toggle('is-revealed', isVisible);
   dom.menuButton.classList.toggle('is-revealed', isVisible);
+}
+
+function isMobileInputDevice() {
+  return window.matchMedia('(max-width: 720px), (hover: none) and (pointer: coarse)').matches;
+}
+
+function setMobileCornerHidden(isHidden) {
+  if (!isMobileInputDevice()) return;
+  dom.fullscreenButton.classList.toggle('is-mobile-hidden', isHidden);
+  dom.menuButton.classList.toggle('is-mobile-hidden', isHidden);
+  dom.miniPlayer.classList.toggle('is-mobile-hidden', isHidden);
+}
+
+function hideMobileCorner(corner) {
+  window.clearTimeout(mobileCornerHideTimer);
+  if (corner === 'controls') {
+    dom.fullscreenButton.classList.add('is-mobile-hidden');
+    dom.menuButton.classList.add('is-mobile-hidden');
+  } else if (corner === 'player') {
+    dom.miniPlayer.classList.add('is-mobile-hidden');
+  }
+}
+
+function scheduleMobileCornerDismissal() {
+  window.clearTimeout(mobileCornerHideTimer);
+  if (!state.started || !isMobileInputDevice() || dom.menu.classList.contains('is-open')) return;
+  setMobileCornerHidden(false);
+  mobileCornerHideTimer = window.setTimeout(() => {
+    if (state.started && !dom.menu.classList.contains('is-open')) setMobileCornerHidden(true);
+  }, mobileCornerHideDelay);
+}
+
+function revealMobileCorner(corner) {
+  window.clearTimeout(mobileCornerHideTimer);
+  if (corner === 'controls') {
+    dom.fullscreenButton.classList.remove('is-mobile-hidden');
+    dom.menuButton.classList.remove('is-mobile-hidden');
+  } else if (corner === 'player') {
+    dom.miniPlayer.classList.remove('is-mobile-hidden');
+  }
+}
+
+function scheduleMobileJoystickDismissal() {
+  window.clearTimeout(mobileJoystickHideTimer);
+  if (!state.started || !isMobileInputDevice() || dom.menu.classList.contains('is-open')) return;
+  mobileJoystickHideTimer = window.setTimeout(() => {
+    if (mobileJoysticks.look.pointerId === null
+      && mobileJoysticks.move.pointerId === null
+      && state.started
+      && !dom.menu.classList.contains('is-open')) {
+      mobileControlsDismissed = true;
+      syncMobileControls();
+    }
+  }, mobileJoystickReleaseHideDelay);
 }
 
 async function toggleFullscreen() {
@@ -5044,6 +5384,8 @@ function updatePlayer(delta) {
   const mobileForward = new THREE.Vector3(Math.sin(yaw), 0, -Math.cos(yaw));
   direction.addScaledVector(mobileForward, -mobileInput.moveY);
   direction.addScaledVector(right, mobileInput.moveX);
+  direction.addScaledVector(mobileForward, -mobileTouchInput.moveY);
+  direction.addScaledVector(right, mobileTouchInput.moveX);
   direction.y += gamepadInput.ascend - gamepadInput.descend;
   if (forwardBoostActive && keys.has('w') && forwardBoostFlutterRemaining > 0) {
     forwardBoostFlutterRemaining = Math.max(0, forwardBoostFlutterRemaining - delta);
@@ -5499,18 +5841,24 @@ function getCameraFloorHeight(x, z) {
 
 function animate() {
   if (activeArcSlide) {
-    const progress = Math.min(1, (performance.now() - activeArcSlide.started) / 750);
+    const progress = Math.min(1, (performance.now() - activeArcSlide.started) / arcVideoSlideDuration);
     arcSlideUniforms.uArcSlide.value = progress * progress * (3 - 2 * progress);
     if (progress >= 1) finishArcVideoSlide();
   }
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.05);
   if (openSeaOrbitGroup) {
-    // Keep angles unwrapped: damping across a 2π -> 0 reset would reverse
-    // the orbit. A short response softens starts and irregular frame timing.
-    openSeaOrbitTargetAngle += openSeaOrbitSpeed * delta;
     const previousAngle = openSeaOrbitAngle;
-    openSeaOrbitAngle = THREE.MathUtils.damp(openSeaOrbitAngle, openSeaOrbitTargetAngle, 8, delta);
+    const orbitUnlocked = openSeaOrbitWaitStartedAt !== null
+      && performance.now() - openSeaOrbitWaitStartedAt >= openSeaOrbitStartDelay;
+    if (orbitUnlocked) {
+      // Keep angles unwrapped: damping across a 2π -> 0 reset would reverse
+      // the orbit. A short response softens starts and irregular frame timing.
+      openSeaOrbitTargetAngle += openSeaOrbitSpeed * delta;
+      openSeaOrbitAngle = THREE.MathUtils.damp(openSeaOrbitAngle, openSeaOrbitTargetAngle, 8, delta);
+    } else {
+      openSeaOrbitTargetAngle = openSeaOrbitAngle;
+    }
     openSeaOrbitActualSpeed = delta > 0 ? (openSeaOrbitAngle - previousAngle) / delta : 0;
     openSeaOrbitGroup.rotation.y = openSeaOrbitAngle;
     // The renderer updates the hierarchy before shadows and reflections;
@@ -5519,8 +5867,10 @@ function animate() {
   updateGamepadInput(delta);
   updateMobileLook(delta);
   updatePlayer(delta);
+  updateSeaAudio();
   updateLuminousBubblePhysics(delta);
   updateCamera(delta);
+  openSeaSeagulls?.update(delta, camera, state.started && !document.hidden);
   updateFlashlight();
   updateParticlePalette(delta);
   updateCinemaProjectionLight(delta);
@@ -5544,7 +5894,8 @@ function animate() {
   }
   if (Math.abs(gamepadInput.moveX) > 0.08 || Math.abs(gamepadInput.moveY) > 0.08
     || gamepadInput.ascend > 0.08 || gamepadInput.descend > 0.08
-    || Math.abs(mobileInput.moveX) > 0.08 || Math.abs(mobileInput.moveY) > 0.08) flightMovement = true;
+    || Math.abs(mobileInput.moveX) > 0.08 || Math.abs(mobileInput.moveY) > 0.08
+    || Math.abs(mobileTouchInput.moveX) > 0.08 || Math.abs(mobileTouchInput.moveY) > 0.08) flightMovement = true;
   const flutterTarget = flightMovement && state.avatarId === 'butterfly' ? 1 : 0;
   butterflyFlutterBlend = THREE.MathUtils.damp(butterflyFlutterBlend, flutterTarget, 5, delta);
   const forwardBoostFlutterTarget = forwardBoostActive
@@ -5680,6 +6031,11 @@ function animate() {
       positions.needsUpdate = true;
     }
   });
+  sunGlarePass.update(camera, openSeaSunDirection, openSeaOrbitGroup ? {
+    angle: openSeaOrbitAngle, centerX: openSeaInstallationCenterX, centerZ: openSeaInstallationCenterZ,
+    innerRadius: openSeaInstallationInnerRadius, outerRadius: openSeaInstallationOuterRadius,
+    bottom: openSeaInstallationBaseY, top: openSeaInstallationBaseY + openSeaInstallationHeight,
+  } : null);
   composer.render();
   if (state.sceneId === 'youtube-cinema') {
     youtubeRenderer.render(youtubeWorld, camera);

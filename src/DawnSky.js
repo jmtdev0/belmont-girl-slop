@@ -90,7 +90,7 @@ export function makeDawnSky(sunDirection, timeUniform = { value: 0 }, options = 
         // Keep this independent of global bloom so flowers/video stay unchanged.
         float corona = 0.75 * exp(-pow(angle / 0.014, 2.0));
         float halo = 0.20 * exp(-pow(angle / 0.055, 2.0));
-        vec3 solarLight = solarColor * (4.0 * disc + corona);
+        vec3 solarLight = solarColor * (12.0 * disc + corona);
         solarLight += vec3(1.0, 0.62, 0.25) * halo;
         // Composite the complete sky, solar disc and halo behind the clouds.
         color += solarLight;
