@@ -146,6 +146,10 @@ export const videoCatalog = [
   { id: "ChPA7AcYIBw", fileName: "140_ChPA7AcYIBw.mp4", title: "after prom", thumbnail: "https://i.ytimg.com/vi/ChPA7AcYIBw/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=ChPA7AcYIBw" },
   { id: "5ppOyNQFXko", fileName: "141_5ppOyNQFXko.mp4", title: "i'll be around", thumbnail: "https://i.ytimg.com/vi/5ppOyNQFXko/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=5ppOyNQFXko" },
   { id: "jx_OsKI03Ao", fileName: "142_jx_OsKI03Ao.mp4", title: "love on a real train", thumbnail: "https://i.ytimg.com/vi/jx_OsKI03Ao/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=jx_OsKI03Ao" },
+  { id: "193rMy_YPA4", fileName: "143_193rMy_YPA4.mp4", title: "too long", thumbnail: "https://i.ytimg.com/vi/193rMy_YPA4/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=193rMy_YPA4" },
+  { id: "qjSZAeSjfwc", fileName: "144_qjSZAeSjfwc.mp4", title: "stay", thumbnail: "https://i.ytimg.com/vi/qjSZAeSjfwc/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=qjSZAeSjfwc" },
+  { id: "MlCrxT5kbKs", fileName: "145_MlCrxT5kbKs.mp4", title: "dreamer", thumbnail: "https://i.ytimg.com/vi/MlCrxT5kbKs/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=MlCrxT5kbKs" },
+  { id: "HTRhrw2Vj-k", fileName: "146_HTRhrw2Vj-k.mp4", title: "my mind, your mind", thumbnail: "https://i.ytimg.com/vi/HTRhrw2Vj-k/hqdefault.jpg", youtubeUrl: "https://www.youtube.com/watch?v=HTRhrw2Vj-k" },
   { id: "belmontgirl_completo", fileName: "belmontgirl_completo.mp4", title: "belmontgirl_completo", thumbnail: "", youtubeUrl: "", localOnly: true },
 ];
 
@@ -155,3 +159,4 @@ export function localVideoUrl(video, remoteBaseUrl = '') {
   const remoteUrl = `${baseUrl}/${encodedFileName}`;
   return baseUrl ? `${remoteUrl}?cors=1` : `/local-videos/${encodedFileName}`;
 }
+
